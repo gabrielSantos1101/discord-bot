@@ -448,6 +448,11 @@ export class ApiServer {
 
   public setBotService(botService: any): void {
     this.app.locals['botService'] = botService;
+    
+    // Set up diagnostic routes now that bot service is available
+    const { createDiagnosticRoutes } = require('./routes/diagnosticRoutes');
+    const diagnosticRoutes = createDiagnosticRoutes(botService);
+    this.app.use('/api/diagnostics', diagnosticRoutes);
   }
 
   public setCacheService(cacheService: any): void {

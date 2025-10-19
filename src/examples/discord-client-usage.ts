@@ -4,12 +4,27 @@
  */
 
 import { ErrorCode } from '../models/ErrorTypes';
+import { CacheService } from '../services/CacheService';
 import { DiscordClientFactory } from '../services/DiscordClientFactory';
+import { CacheConfig } from '../utils/config';
 
 async function demonstrateDiscordClient() {
   try {
+    // Create cache service instance
+    const cacheConfig: CacheConfig = {
+      redisUrl: undefined,
+      redisHost: 'localhost',
+      redisPort: 6379,
+      redisPassword: undefined,
+      redisDb: 0,
+      defaultTtl: 60,
+      enabled: false // Disable for example
+    };
+    const cacheService = new CacheService(cacheConfig);
+    await cacheService.initialize();
+    
     // Create Discord client instance
-    const client = DiscordClientFactory.create();
+    const client = DiscordClientFactory.create(cacheService);
     
     console.log('Discord Client created successfully');
     
@@ -72,7 +87,20 @@ async function testDiscordConnection() {
   console.log('\n--- Testing Discord Connection ---');
   
   try {
-    const isConnected = await DiscordClientFactory.testConnection();
+    // Create cache service for connection test
+    const cacheConfig: CacheConfig = {
+      redisUrl: undefined,
+      redisHost: 'localhost',
+      redisPort: 6379,
+      redisPassword: undefined,
+      redisDb: 0,
+      defaultTtl: 60,
+      enabled: false // Disable for example
+    };
+    const cacheService = new CacheService(cacheConfig);
+    await cacheService.initialize();
+    
+    const isConnected = await DiscordClientFactory.testConnection(cacheService);
     console.log('Connection test result:', isConnected ? 'SUCCESS' : 'FAILED');
   } catch (error: any) {
     console.error('Connection test failed:', error.message);

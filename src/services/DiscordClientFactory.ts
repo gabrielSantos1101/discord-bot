@@ -1,4 +1,5 @@
 import { getDiscordConfig, validateBotToken } from '../utils/config';
+import { CacheService } from './CacheService';
 import { DiscordClient } from './DiscordClient';
 
 /**

@@ -2,6 +2,7 @@ import { Activity as DiscordActivity, Presence } from 'discord.js';
 import { Activity } from '../../models/Activity';
 import { UserActivityResponse, UserPresenceResponse, UserStatusResponse } from '../../models/ApiResponses';
 import { CacheService } from '../../services/CacheService';
+import { presenceErrorHandler } from '../../services/PresenceErrorHandler';
 import { logger } from '../../utils/logger';
 
 /**
@@ -40,7 +41,7 @@ export class PresenceEventHandler {
   async handlePresenceUpdate(oldPresence: Presence | null, newPresence: Presence): Promise<void> {
     try {
       const userId = newPresence.userId;
-      
+
       logger.debug('Processing presence update', {
         component: 'PresenceEventHandler',
         operation: 'presence_update',
@@ -53,13 +54,17 @@ export class PresenceEventHandler {
       });
 
       this.debouncePresenceUpdate(userId, newPresence);
-      
+
     } catch (error) {
-      logger.error('Error handling presence update', {
+      const errorContext: any = {
         component: 'PresenceEventHandler',
         operation: 'presence_update',
         userId: newPresence.userId
-      }, error as Error);
+      };
+      if (newPresence.guild?.id) {
+        errorContext.guildId = newPresence.guild.id;
+      }
+      presenceErrorHandler.handleError(error as Error, errorContext);
     }
   }
 
@@ -121,11 +126,11 @@ export class PresenceEventHandler {
       });
 
     } catch (error) {
-      logger.error('Error updating user cache', {
+      presenceErrorHandler.handleError(error as Error, {
         component: 'PresenceEventHandler',
         operation: 'cache_update',
         userId
-      }, error as Error);
+      });
     }
   }
 
@@ -153,11 +158,11 @@ export class PresenceEventHandler {
 
       return null;
     } catch (error) {
-      logger.error('Error getting user activity data', {
+      presenceErrorHandler.handleError(error as Error, {
         component: 'PresenceEventHandler',
         operation: 'get_activity_data',
         userId
-      }, error as Error);
+      });
 
       return this.memoryCache.get(userId) || null;
     }
@@ -177,11 +182,11 @@ export class PresenceEventHandler {
         await this.processPresenceUpdate(userId, presence);
         this.presenceUpdateQueue.delete(userId);
       } catch (error) {
-        logger.error('Error in debounced presence update', {
+        presenceErrorHandler.handleError(error as Error, {
           component: 'PresenceEventHandler',
           operation: 'debounced_update',
           userId
-        }, error as Error);
+        });
       }
     }, this.DEBOUNCE_DELAY);
 
@@ -201,7 +206,7 @@ export class PresenceEventHandler {
    */
   private transformDiscordActivity(activity: DiscordActivity): Activity {
     let activityType: Activity['type'];
-    
+
     switch (activity.type) {
       case 0:
         activityType = 'playing';
@@ -298,7 +303,7 @@ export class PresenceEventHandler {
    */
   private async updateUserPresence(userId: string, activityData: UserActivityData): Promise<void> {
     const currentActivity = activityData.activities.length > 0 ? activityData.activities[0] : null;
-    
+
     const presenceData: UserPresenceResponse = {
       userId,
       currentActivity: currentActivity || null,
@@ -324,7 +329,7 @@ export class PresenceEventHandler {
   private setupMemoryCleanup(): void {
     setInterval(() => {
       const now = Date.now();
-      
+
       for (const [userId, data] of this.memoryCache.entries()) {
         const dataAge = now - data.lastUpdated.getTime();
         if (dataAge > this.MEMORY_CACHE_TTL) {

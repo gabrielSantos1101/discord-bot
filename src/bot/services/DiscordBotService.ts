@@ -1,6 +1,9 @@
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { CacheService } from '../../services/CacheService';
 import { DatabaseService } from '../../services/DatabaseService';
+import { DiagnosticService } from '../../services/DiagnosticService';
+import { PresenceError, presenceErrorHandler, PresenceErrorType } from '../../services/PresenceErrorHandler';
+import { PresenceSyncService } from '../../services/PresenceSyncService';
 import { getDiscordConfig } from '../../utils/config';
 import { logger } from '../../utils/logger';
 import { CommandManager } from '../commands/CommandManager';
@@ -15,6 +18,8 @@ export class DiscordBotService {
   private autoChannelManager: AutoChannelManager | null = null;
   private commandManager: CommandManager | null = null;
   private presenceEventHandler: PresenceEventHandler | null = null;
+  private presenceSyncService: PresenceSyncService | null = null;
+  private diagnosticService: DiagnosticService | null = null;
   private databaseService: DatabaseService;
   private cacheService: CacheService;
   private isReady = false;
@@ -155,9 +160,26 @@ export class DiscordBotService {
       this.autoChannelManager = new AutoChannelManager(this.client, this.cacheService);
       this.commandManager = new CommandManager(this.client, this.databaseService);
       this.presenceEventHandler = new PresenceEventHandler(this.cacheService);
+      this.presenceSyncService = new PresenceSyncService(
+        this.client,
+        this.presenceEventHandler
+      );
+      this.diagnosticService = new DiagnosticService(this.client, this.cacheService);
 
       await this.loadAllServerConfigurations();
-      this.setupPresenceRecovery();
+      this.presenceSyncService.start();
+
+      // Run initial diagnostics
+      setTimeout(async () => {
+        try {
+          await this.diagnosticService!.runDiagnosticsWithAlerts();
+        } catch (error) {
+          logger.error('Initial diagnostics failed', {
+            component: 'DiscordBotService',
+            operation: 'initial_diagnostics'
+          }, error as Error);
+        }
+      }, 10000); // Wait 10 seconds after startup
 
       this.isReady = true;
       logger.info('Discord bot service fully initialized', {
@@ -219,11 +241,18 @@ export class DiscordBotService {
   private async onPresenceUpdate(oldPresence: any, newPresence: any): Promise<void> {
     try {
       if (!this.presenceEventHandler) {
-        logger.warn('Presence event handler not initialized', {
-          component: 'DiscordBotService',
-          operation: 'presence_update',
-          userId: newPresence?.userId
-        });
+        const error = new PresenceError(
+          PresenceErrorType.EVENT_PROCESSING,
+          'Presence event handler not initialized',
+          {
+            component: 'DiscordBotService',
+            operation: 'presence_update',
+            userId: newPresence?.userId,
+            guildId: newPresence?.guild?.id
+          },
+          false
+        );
+        presenceErrorHandler.handleError(error);
         return;
       }
 
@@ -234,12 +263,12 @@ export class DiscordBotService {
       await this.presenceEventHandler.handlePresenceUpdate(oldPresence, newPresence);
       
     } catch (error) {
-      logger.error('Error processing presence update event', {
+      presenceErrorHandler.handleError(error as Error, {
         component: 'DiscordBotService',
         operation: 'presence_update',
         userId: newPresence?.userId,
         guildId: newPresence?.guild?.id
-      }, error as Error);
+      });
     }
   }
 
@@ -336,6 +365,10 @@ export class DiscordBotService {
         this.autoChannelManager.stop();
       }
 
+      if (this.presenceSyncService) {
+        this.presenceSyncService.stop();
+      }
+
       if (this.presenceEventHandler) {
         this.presenceEventHandler.clearCache();
       }
@@ -392,57 +425,33 @@ export class DiscordBotService {
   }
 
   /**
-   * Setup periodic presence recovery to handle missed events
+   * Get presence sync service (for external access)
    */
-  private setupPresenceRecovery(): void {
-    setInterval(async () => {
-      try {
-        await this.syncGuildPresences();
-      } catch (error) {
-        logger.error('Presence recovery failed', {
-          component: 'DiscordBotService',
-          operation: 'recovery_sync'
-        }, error as Error);
-      }
-    }, 5 * 60 * 1000); // Every 5 minutes
+  public getPresenceSyncService(): PresenceSyncService | null {
+    return this.presenceSyncService;
   }
 
   /**
-   * Synchronize presence data for all guild members
+   * Get diagnostic service (for external access)
    */
-  private async syncGuildPresences(): Promise<void> {
-    if (!this.presenceEventHandler || !this.isReady) {
-      return;
+  public getDiagnosticService(): DiagnosticService | null {
+    return this.diagnosticService;
+  }
+
+  /**
+   * Get presence error handler (for external access)
+   */
+  public getPresenceErrorHandler() {
+    return presenceErrorHandler;
+  }
+
+  /**
+   * Run diagnostics and return report
+   */
+  public async runDiagnostics() {
+    if (!this.diagnosticService) {
+      throw new Error('Diagnostic service not initialized');
     }
-
-    try {
-      let totalSynced = 0;
-      
-      for (const guild of this.client.guilds.cache.values()) {
-        const presences = guild.presences.cache;
-        
-        for (const presence of presences.values()) {
-          if (presence.user && !presence.user.bot) {
-            await this.presenceEventHandler.handlePresenceUpdate(null, presence);
-            totalSynced++;
-          }
-        }
-      }
-
-      logger.debug('Guild presences synchronized', {
-        component: 'DiscordBotService',
-        operation: 'presence_sync',
-        metadata: {
-          totalSynced,
-          guilds: this.client.guilds.cache.size
-        }
-      });
-
-    } catch (error) {
-      logger.error('Error synchronizing guild presences', {
-        component: 'DiscordBotService',
-        operation: 'presence_sync'
-      }, error as Error);
-    }
+    return await this.diagnosticService.runDiagnosticsWithAlerts();
   }
 }
