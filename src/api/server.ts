@@ -449,7 +449,7 @@ export class ApiServer {
 
   public setBotService(botService: any): void {
     this.app.locals['botService'] = botService;
-    
+
     const { createDiagnosticRoutes } = require('./routes/diagnosticRoutes');
     const diagnosticRoutes = createDiagnosticRoutes(botService);
     this.app.use('/api/diagnostics', diagnosticRoutes);
@@ -463,20 +463,29 @@ export class ApiServer {
   }
 
   public setCacheService(cacheService: any): void {
+    console.log('🔧 SETTING UP CACHE SERVICE AND USER ROUTES...');
     this.app.locals['cacheService'] = cacheService;
-    
+
     const botService = this.app.locals['botService'];
     const metricsService = botService?.getMetricsService?.();
-    
-    const { createUserRoutes } = require('./routes/userRoutes');
-    const userRoutes = createUserRoutes(cacheService, metricsService);
-    this.app.use('/api/users', userRoutes);
+
+    console.log('📦 Creating user routes...');
+    try {
+      const { createUserRoutes } = require('./routes/userRoutes');
+      const userRoutes = createUserRoutes(cacheService, metricsService);
+      console.log('🔗 Mounting user routes on /api/users...');
+      this.app.use('/api/users', userRoutes);
+      console.log('✅ User routes mounted successfully');
+    } catch (error) {
+      console.error('❌ Error setting up user routes:', error);
+    }
+    console.log('✅ USER ROUTES CONFIGURED SUCCESSFULLY!');
   }
 
   public setOrchestrator(orchestrator: ServiceOrchestrator): void {
     this.orchestrator = orchestrator;
     this.app.locals['orchestrator'] = orchestrator;
-    
+
     const { healthRoutes } = require('./routes/healthRoutes');
     healthRoutes.setOrchestrator(orchestrator);
   }

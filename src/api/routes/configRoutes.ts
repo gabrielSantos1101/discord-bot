@@ -18,11 +18,71 @@ export class ConfigRoutes {
    * Setup configuration routes
    */
   private setupRoutes(): void {
+    // GET /api/config/server/{serverId} - Get server configuration
+    this.router.get('/server/:serverId', this.getServerConfig.bind(this));
+    
     // POST /api/config/server/{serverId} - Update server configuration
     this.router.post('/server/:serverId', this.updateServerConfig.bind(this));
     
     // GET /api/channels/auto/{templateId} - Get auto channel status
     this.router.get('/auto/:templateId', this.getAutoChannelStatus.bind(this));
+  }
+
+  /**
+   * Get server configuration endpoint
+   * GET /api/config/server/{serverId}
+   */
+  private async getServerConfig(req: Request, res: Response): Promise<void> {
+    try {
+      const { serverId } = req.params;
+      const requestId = req.headers['x-request-id'] as string;
+
+      // Validate server ID
+      if (!serverId || !this.isValidServerId(serverId)) {
+        res.status(400).json(this.createErrorResponse(
+          'INVALID_SERVER_ID',
+          'Server ID must be a valid Discord snowflake (numeric string)',
+          requestId
+        ));
+        return;
+      }
+
+      const databaseService = req.app.locals['databaseService'];
+      if (!databaseService) {
+        res.status(503).json(this.createErrorResponse(
+          'SERVICE_UNAVAILABLE',
+          'Database service is not available',
+          requestId
+        ));
+        return;
+      }
+
+      // Get server configuration
+      let serverConfig = await databaseService.getServerConfig(serverId);
+      if (!serverConfig) {
+        // Create default configuration if none exists
+        serverConfig = await databaseService.createDefaultServerConfig(serverId);
+      }
+
+      const response: ApiResponse<any> = {
+        data: serverConfig,
+        timestamp: new Date().toISOString(),
+        requestId,
+        success: true
+      };
+
+      res.json(response);
+
+    } catch (error) {
+      const requestId = req.headers['x-request-id'] as string;
+      console.error('Error getting server configuration:', error);
+      
+      res.status(500).json(this.createErrorResponse(
+        'INTERNAL_SERVER_ERROR',
+        'Failed to retrieve server configuration',
+        requestId
+      ));
+    }
   }
 
   /**

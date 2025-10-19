@@ -13,7 +13,7 @@ export class DiscordClientFactory {
    */
   static create(cacheService: CacheService): DiscordClient {
     const config = getDiscordConfig();
-    
+
     if (!config.botToken) {
       throw new Error('Discord bot token is required. Please set DISCORD_BOT_TOKEN environment variable.');
     }
@@ -48,8 +48,18 @@ export class DiscordClientFactory {
   static async testConnection(cacheService: CacheService): Promise<boolean> {
     try {
       const client = this.create(cacheService);
-      // Try to get the bot's own user data to test the connection
-      const botUser = await client.getUserData('@me');
+      const response = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: {
+          'Authorization': `Bot ${client['botToken']}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Discord API returned ${response.status}: ${response.statusText}`);
+      }
+
+      const botUser = await response.json() as { bot?: boolean };
       return botUser.bot === true;
     } catch (error) {
       console.error('Discord client connection test failed:', error);

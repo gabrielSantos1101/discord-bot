@@ -4,7 +4,6 @@ import { ErrorCode } from '../../models/ErrorTypes';
 import { validateUserData } from '../../models/validators/UserDataValidator';
 import { CacheService } from '../../services/CacheService';
 import { DiscordClient } from '../../services/DiscordClient';
-import { DiscordClientFactory } from '../../services/DiscordClientFactory';
 
 /**
  * User routes for Discord user data endpoints
@@ -15,11 +14,14 @@ export class UserRoutes {
   private cacheService: CacheService;
   private metricsService?: any;
 
-  constructor(cacheService: CacheService, metricsService?: any) {
+  constructor(cacheService?: CacheService | null, metricsService?: any) {
     this.router = Router();
-    this.cacheService = cacheService;
+    this.cacheService = cacheService as CacheService;
     this.metricsService = metricsService;
-    this.discordClient = DiscordClientFactory.getInstance(cacheService);
+    
+    // Don't create DiscordClient here - will be created when needed
+    this.discordClient = null as any;
+    
     this.setupRoutes();
   }
 
@@ -27,6 +29,12 @@ export class UserRoutes {
    * Setup user routes
    */
   private setupRoutes(): void {
+    // Add debug middleware
+    this.router.use((req, _res, next) => {
+      console.log(`🔍 UserRoutes: ${req.method} ${req.path}`);
+      next();
+    });
+    
     this.router.get('/:userId/status', this.getUserStatus.bind(this));
     this.router.get('/:userId/activity', this.getUserActivity.bind(this));
     this.router.get('/:userId/presence', this.getUserPresence.bind(this));
@@ -43,8 +51,17 @@ export class UserRoutes {
 
     try {
       const { userId } = req.params;
-      const { guildId } = req.query;
       const requestId = req.headers['x-request-id'] as string;
+
+      // Check if services are available
+      if (!this.discordClient || !this.cacheService) {
+        res.status(503).json(this.createErrorResponse(
+          'SERVICE_UNAVAILABLE',
+          'Discord services are currently unavailable. Please check bot configuration and intents.',
+          requestId
+        ));
+        return;
+      }
 
       if (!userId || !this.isValidUserId(userId)) {
         res.status(400).json(this.createErrorResponse(
@@ -70,7 +87,7 @@ export class UserRoutes {
       } else {
         userData = await this.discordClient.getUserData(
           userId,
-          guildId as string | undefined
+          req.query['guildId'] as string | undefined
         );
       }
 
@@ -346,8 +363,9 @@ export class UserRoutes {
   }
 }
 
-export function createUserRoutes(cacheService: CacheService, metricsService?: any): Router {
-  return new UserRoutes(cacheService, metricsService).getRouter();
+export function createUserRoutes(cacheService?: CacheService | null, metricsService?: any): Router {
+  const userRoutes = new UserRoutes(cacheService, metricsService);
+  return userRoutes.getRouter();
 }
 
 export let userRoutes: Router;

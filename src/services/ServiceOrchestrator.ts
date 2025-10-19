@@ -236,9 +236,10 @@ export class ServiceOrchestrator {
         this.apiServer.setDatabaseService(this.databaseService);
       }
 
-      if (this.cacheService) {
-        this.apiServer.setCacheService(this.cacheService);
-      }
+      // Always set cache service (even if not available) to configure user routes
+      console.log('🚀 ServiceOrchestrator calling setCacheService...');
+      this.apiServer.setCacheService(this.cacheService);
+      console.log('✅ setCacheService called successfully');
       
       await this.apiServer.start();
       
