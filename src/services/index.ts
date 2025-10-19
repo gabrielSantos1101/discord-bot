@@ -1,3 +1,6 @@
 // Shared services
 export * from './CacheService';
 export * from './DatabaseService';
+export * from './DiscordClient';
+export * from './DiscordClientFactory';
+

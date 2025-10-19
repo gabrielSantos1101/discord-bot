@@ -16,7 +16,12 @@
   - Criar validadores para modelos de dados
   - _Requisitos: 1.1, 1.4, 2.3_
 
-- [ ] 3. Configurar cliente Discord para consultas diretas
+- [x] 3. Configurar cliente Discord para consultas diretas
+
+
+
+
+
 
   - Implementar DiscordClient para consultas HTTP à API do Discord
   - Criar métodos para buscar dados de usuário em tempo real
