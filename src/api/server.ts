@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import winston from 'winston';
 import { ErrorCode } from '../models/ErrorTypes';
+import { ServiceOrchestrator } from '../services/ServiceOrchestrator';
 import { AppConfig } from '../utils/config';
 import {
   createErrorResponse as createStandardErrorResponse,
@@ -12,13 +13,11 @@ import {
 } from '../utils/errorHandler';
 import { LogContext, logger } from '../utils/logger';
 
-/**
- * Express server for Discord Bot API
- */
 export class ApiServer {
   private app: Application;
   private config: AppConfig;
   private logger: winston.Logger;
+  private orchestrator?: ServiceOrchestrator;
 
   constructor(config: AppConfig) {
     this.app = express();
@@ -29,9 +28,6 @@ export class ApiServer {
     this.setupErrorHandling();
   }
 
-  /**
-   * Create Winston logger instance
-   */
   private createLogger(): winston.Logger {
     return winston.createLogger({
       level: this.config.logLevel,
@@ -58,9 +54,6 @@ export class ApiServer {
     });
   }
 
-  /**
-   * Setup Express middleware
-   */
   private setupMiddleware(): void {
     this.app.use(helmet());
 
@@ -199,91 +192,9 @@ export class ApiServer {
     });
   }
 
-  /**
-   * Setup API routes with enhanced health checks
-   */
   private setupRoutes(): void {
-    this.app.get('/health', (_req: Request, res: Response) => {
-      res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        version: '1.0.0'
-      });
-    });
-
-    this.app.get('/health/detailed', async (req: Request, res: Response) => {
-      const requestId = req.headers['x-request-id'] as string;
-      const context: LogContext = {
-        requestId,
-        component: 'ApiServer',
-        operation: 'health_check'
-      };
-
-      try {
-        const health = {
-          status: 'healthy',
-          timestamp: new Date().toISOString(),
-          version: '1.0.0',
-          services: {
-            api: { status: 'healthy' },
-            discord: { status: 'unknown' } as any,
-            cache: { status: 'unknown' } as any,
-            database: { status: 'unknown' } as any
-          },
-          metrics: {
-            uptime: process.uptime(),
-            memory: process.memoryUsage(),
-            cpu: process.cpuUsage()
-          }
-        };
-
-        try {
-          const { DiscordClientFactory } = require('../services/DiscordClientFactory');
-          const discordClient = DiscordClientFactory.getInstance();
-          if (discordClient && typeof discordClient.healthCheck === 'function') {
-            const discordHealth = await discordClient.healthCheck();
-            health.services.discord = {
-              status: discordHealth.healthy ? 'healthy' : 'unhealthy',
-              details: discordHealth
-            };
-          }
-        } catch (error) {
-          health.services.discord = { status: 'error', error: (error as Error).message };
-        }
-
-        try {
-          const { CacheServiceFactory } = require('../services/CacheServiceFactory');
-          const cacheService = await CacheServiceFactory.create();
-          health.services.cache = {
-            status: cacheService.isAvailable() ? 'healthy' : 'unavailable'
-          };
-        } catch (error) {
-          health.services.cache = { status: 'error', error: (error as Error).message };
-        }
-
-        const serviceStatuses = Object.values(health.services).map(s => s.status);
-        const hasUnhealthy = serviceStatuses.includes('unhealthy') || serviceStatuses.includes('error');
-
-        if (hasUnhealthy) {
-          health.status = 'degraded';
-          res.status(503);
-        }
-
-        logger.debug('Health check completed', {
-          ...context,
-          metadata: { overallStatus: health.status }
-        });
-
-        res.json(health);
-      } catch (error) {
-        logger.error('Health check failed', context, error as Error);
-        res.status(500).json({
-          status: 'error',
-          timestamp: new Date().toISOString(),
-          error: 'Health check failed'
-        });
-      }
-    });
+    const { healthRouter } = require('./routes/healthRoutes');
+    this.app.use('/health', healthRouter);
 
     this.app.get('/api', (_req: Request, res: Response) => {
       res.json({
@@ -342,9 +253,6 @@ export class ApiServer {
     this.app.use('/api/channels', configRoutes);
   }
 
-  /**
-   * Setup comprehensive error handling middleware
-   */
   private setupErrorHandling(): void {
     this.app.use('*', (req: Request, res: Response) => {
       const requestId = req.headers['x-request-id'] as string || generateRequestId();
@@ -456,11 +364,6 @@ export class ApiServer {
     });
   }
 
-
-
-  /**
-   * Sanitize request data to prevent injection attacks
-   */
   private sanitizeRequestData(data: any, context?: LogContext): any {
     if (typeof data === 'string') {
       const sanitized = data
@@ -499,9 +402,6 @@ export class ApiServer {
     return data;
   }
 
-  /**
-   * Start the server
-   */
   public async start(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
@@ -542,24 +442,27 @@ export class ApiServer {
     });
   }
 
-  /**
-   * Set database service for use in routes
-   */
   public setDatabaseService(databaseService: any): void {
     this.app.locals['databaseService'] = databaseService;
   }
 
-  /**
-   * Set bot service for use in routes
-   */
   public setBotService(botService: any): void {
     this.app.locals['botService'] = botService;
   }
 
-  /**
-   * Get Express app instance (for testing)
-   */
+  public setOrchestrator(orchestrator: ServiceOrchestrator): void {
+    this.orchestrator = orchestrator;
+    this.app.locals['orchestrator'] = orchestrator;
+    
+    const { healthRoutes } = require('./routes/healthRoutes');
+    healthRoutes.setOrchestrator(orchestrator);
+  }
+
   public getApp(): Application {
     return this.app;
+  }
+
+  public getOrchestrator(): ServiceOrchestrator | undefined {
+    return this.orchestrator;
   }
 }

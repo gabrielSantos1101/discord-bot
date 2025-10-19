@@ -125,7 +125,13 @@
   - Adicionar validação e sanitização de dados de entrada
   - _Requisitos: 1.5, 4.4, 4.1_
 
-- [ ] 9. Integrar componentes e configurar inicialização
+- [x] 9. Integrar componentes e configurar inicialização
+
+
+
+
+
+
 
   - Conectar API REST com DiscordClient para consultas diretas
   - Separar bot Discord (canais) da API REST (consultas)

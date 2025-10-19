@@ -89,7 +89,7 @@ export function loadConfig(): AppConfig {
       redisPassword: process.env['REDIS_PASSWORD'],
       redisDb: parseInt(process.env['REDIS_DB'] || '0'),
       defaultTtl: parseInt(process.env['CACHE_TTL'] || '60'),
-      enabled: process.env['CACHE_ENABLED'] !== 'false'
+      enabled: process.env['CACHE_ENABLED'] !== 'false' && process.env['SKIP_REDIS'] !== 'true'
     },
     environment: process.env['NODE_ENV'] || 'development',
     logLevel: process.env['LOG_LEVEL'] || 'info'
