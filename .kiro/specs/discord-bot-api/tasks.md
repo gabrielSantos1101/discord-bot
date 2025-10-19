@@ -140,7 +140,12 @@
   - Configurar graceful shutdown para todos os componentes
   - _Requisitos: 4.1, 4.2_
 
-- [ ] 10. Criar testes automatizados
+- [x] 10. Criar testes automatizados
+
+
+
+
+
 
   - Escrever testes unitários para modelos e validadores
   - Criar testes de integração para endpoints da API
