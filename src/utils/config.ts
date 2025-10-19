@@ -33,6 +33,14 @@ export interface ApiConfig {
 export interface CacheConfig {
   /** Redis connection URL */
   redisUrl: string | undefined;
+  /** Redis host */
+  redisHost: string;
+  /** Redis port */
+  redisPort: number;
+  /** Redis password (optional) */
+  redisPassword: string | undefined;
+  /** Redis database number */
+  redisDb: number;
   /** Default TTL for cached data (seconds) */
   defaultTtl: number;
   /** Whether cache is enabled */
@@ -76,6 +84,10 @@ export function loadConfig(): AppConfig {
     },
     cache: {
       redisUrl: process.env['REDIS_URL'],
+      redisHost: process.env['REDIS_HOST'] || 'localhost',
+      redisPort: parseInt(process.env['REDIS_PORT'] || '6379'),
+      redisPassword: process.env['REDIS_PASSWORD'],
+      redisDb: parseInt(process.env['REDIS_DB'] || '0'),
       defaultTtl: parseInt(process.env['CACHE_TTL'] || '60'),
       enabled: process.env['CACHE_ENABLED'] !== 'false'
     },

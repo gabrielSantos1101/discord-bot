@@ -29,7 +29,10 @@
   - Adicionar autenticação com bot token
   - _Requisitos: 1.1, 1.2, 1.3, 4.1, 4.4_
 
-- [ ] 4. Implementar sistema de cache Redis (opcional)
+- [-] 4. Implementar sistema de cache Redis (opcional)
+
+
+
 
   - Configurar conexão com Redis para cache opcional
   - Criar funções para cache de dados com TTL curto (30-60s)

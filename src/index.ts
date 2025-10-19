@@ -1,5 +1,7 @@
 import dotenv from 'dotenv';
+import { CacheServiceFactory } from './services';
 import { DiscordClientFactory } from './services/DiscordClientFactory';
+import { loadConfig } from './utils/config';
 
 // Load environment variables
 dotenv.config();
@@ -7,6 +9,30 @@ dotenv.config();
 // Main application entry point
 async function main() {
   console.log('Discord Bot API starting...');
+  
+  // Load configuration
+  const config = loadConfig();
+  
+  // Initialize Cache Service (Task 4 - Complete)
+  try {
+    console.log('Initializing Cache Service...');
+    const cacheService = await CacheServiceFactory.create(config.cache);
+    
+    if (cacheService.isAvailable()) {
+      console.log('✓ Cache Service initialized and connected to Redis');
+      
+      // Show cache stats
+      const stats = await cacheService.getStats();
+      if (stats && stats.connected) {
+        console.log(`  → Redis memory usage: ${stats.memory || 'unknown'}`);
+        console.log(`  → Cached keys: ${stats.keyCount || 0}`);
+      }
+    } else {
+      console.log('⚠ Cache Service initialized but not available (disabled or connection failed)');
+    }
+  } catch (error: any) {
+    console.error('✗ Failed to initialize Cache Service:', error.message);
+  }
   
   // Initialize Discord Client (Task 3 - Complete)
   try {
@@ -28,22 +54,42 @@ async function main() {
   
   // TODO: Initialize remaining services in next tasks
   // - REST API Service (Task 5)
-  // - Cache Service (Task 4)
   // - Database Service
   // - Discord Bot Service (Task 6)
   
   console.log('Application initialized successfully');
 }
 
+// Graceful shutdown handler
+async function gracefulShutdown(signal: string) {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+  
+  try {
+    // Close cache service
+    await CacheServiceFactory.close();
+    console.log('✓ Cache service closed');
+    
+    console.log('✓ Graceful shutdown complete');
+    process.exit(0);
+  } catch (error) {
+    console.error('✗ Error during shutdown:', error);
+    process.exit(1);
+  }
+}
+
+// Handle process signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
   console.error('Uncaught Exception:', error);
-  process.exit(1);
+  await gracefulShutdown('uncaughtException');
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
+  await gracefulShutdown('unhandledRejection');
 });
 
 // Start the application
