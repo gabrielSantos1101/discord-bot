@@ -153,7 +153,11 @@
   - Adicionar testes de carga para verificar performance
   - _Requisitos: 1.4, 4.3_
 
-- [ ] 11. Adicionar documentação e exemplos
+- [x] 11. Adicionar documentação e exemplos
+
+
+
+
   - Criar documentação da API com exemplos de uso
   - Escrever guia de instalação e configuração
   - Adicionar exemplos de configuração para diferentes cenários
