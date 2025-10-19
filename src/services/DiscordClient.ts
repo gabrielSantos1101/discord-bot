@@ -2,22 +2,17 @@ import { Activity } from '../models/Activity';
 import { DiscordApiError, ErrorCode } from '../models/ErrorTypes';
 import { RichPresence } from '../models/RichPresence';
 import { UserData, UserStatus } from '../models/UserData';
+import { CircuitBreaker, DEFAULT_BACKOFF_CONFIGS, extractErrorInfo, handleDiscordRateLimit, LogContext, logger, retryWithBackoff, SanitizationUtils, ValidationUtils } from '../utils';
 
 /**
  * Rate limiting configuration for Discord API
  */
 interface RateLimitConfig {
-  /** Maximum requests per second */
   maxRequestsPerSecond: number;
-  /** Current request count in the current second */
   currentRequests: number;
-  /** Timestamp of the current second window */
   windowStart: number;
-  /** Queue of pending requests */
   requestQueue: Array<() => void>;
-  /** Whether we're currently rate limited */
   isRateLimited: boolean;
-  /** When the rate limit will reset */
   rateLimitResetAt: number | null;
 }
 
@@ -106,12 +101,19 @@ interface DiscordActivity {
 
 /**
  * Client for making direct HTTP requests to Discord API
- * Handles authentication, rate limiting, and data transformation
+ * Handles authentication, rate limiting, and data transformation with robust error handling
  */
 export class DiscordClient {
   private readonly baseUrl = 'https://discord.com/api/v10';
   private readonly botToken: string;
   private readonly rateLimitConfig: RateLimitConfig;
+  private readonly circuitBreaker: CircuitBreaker;
+  private readonly requestMetrics = {
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    rateLimitHits: 0
+  };
 
   constructor(botToken: string) {
     if (!botToken) {
@@ -120,67 +122,128 @@ export class DiscordClient {
     
     this.botToken = botToken;
     this.rateLimitConfig = {
-      maxRequestsPerSecond: 50, // Discord allows 50 requests per second
+      maxRequestsPerSecond: 50,
       currentRequests: 0,
       windowStart: Date.now(),
       requestQueue: [],
       isRateLimited: false,
       rateLimitResetAt: null
     };
+    
+    // Initialize circuit breaker for Discord API
+    this.circuitBreaker = new CircuitBreaker(5, 60000); // 5 failures, 1 minute recovery
   }
 
   /**
-   * Get user data by user ID
+   * Get user data by user ID with robust error handling and validation
    * Makes direct HTTP request to Discord API
    */
   async getUserData(userId: string, guildId?: string): Promise<UserData> {
-    if (!userId) {
-      throw this.createError(ErrorCode.INVALID_REQUEST, 'User ID is required');
-    }
+    const context: LogContext = {
+      component: 'DiscordClient',
+      operation: 'getUserData',
+      userId: SanitizationUtils.sanitizeUserId(userId),
+      ...(guildId && { guildId: SanitizationUtils.sanitizeUserId(guildId) })
+    };
 
-    try {
-      // Get basic user info
-      const user = await this.makeRequest<DiscordUser>(`/users/${userId}`);
-      
-      // Get guild member info if guild ID is provided
-      let guildMember: DiscordGuildMember | null = null;
-      if (guildId) {
-        try {
-          guildMember = await this.makeRequest<DiscordGuildMember>(`/guilds/${guildId}/members/${userId}`);
-        } catch (error) {
-          // User might not be in the guild, continue with basic user data
-          console.warn(`User ${userId} not found in guild ${guildId}`);
-        }
-      }
-
-      // Get presence data if guild ID is provided
-      let presence: DiscordPresence | null = null;
-      if (guildId) {
-        try {
-          // Note: Getting presence requires special permissions and may not always be available
-          // This is a simplified approach - in practice, presence data is usually received via gateway
-          presence = await this.getPresenceData(userId, guildId);
-        } catch (error) {
-          // Presence data might not be available, continue without it
-          console.warn(`Presence data not available for user ${userId}`);
-        }
-      }
-
-      return this.transformUserData(user, guildMember, presence);
-    } catch (error) {
-      if (error instanceof Error) {
-        // Check if it's a Discord API error with 404 status
-        const errorDetails = (error as any).details;
-        if (errorDetails && errorDetails.status === 404) {
-          throw this.createError(ErrorCode.USER_NOT_FOUND, `User with ID ${userId} not found`);
-        }
-        // Check if error message contains 404 (fallback)
-        if (error.message.includes('404')) {
-          throw this.createError(ErrorCode.USER_NOT_FOUND, `User with ID ${userId} not found`);
-        }
-      }
+    // Validate and sanitize input
+    const userIdValidation = ValidationUtils.validateUserId(userId, context);
+    if (!userIdValidation.isValid) {
+      const error = new Error('Invalid user ID format');
+      (error as any).code = ErrorCode.INVALID_REQUEST;
+      (error as any).details = userIdValidation.errors;
       throw error;
     }
+
+    if (guildId) {
+      const guildIdValidation = ValidationUtils.validateGuildId(guildId, context);
+      if (!guildIdValidation.isValid) {
+        const error = new Error('Invalid guild ID format');
+        (error as any).code = ErrorCode.INVALID_REQUEST;
+        (error as any).details = guildIdValidation.errors;
+        throw error;
+      }
+    }
+
+    const sanitizedUserId = userIdValidation.data!;
+    const sanitizedGuildId = guildId ? ValidationUtils.validateGuildId(guildId, context).data : undefined;
+
+    return retryWithBackoff(async () => {
+      try {
+        logger.info('Fetching user data', {
+          ...context,
+          metadata: { hasGuildId: !!sanitizedGuildId }
+        });
+
+        const user = await this.makeRequest<DiscordUser>(`/users/${sanitizedUserId}`, context);
+        
+        let guildMember: DiscordGuildMember | null = null;
+        if (sanitizedGuildId) {
+          try {
+            guildMember = await this.makeRequest<DiscordGuildMember>(
+              `/guilds/${sanitizedGuildId}/members/${sanitizedUserId}`,
+              context
+            );
+          } catch (error) {
+            const errorInfo = extractErrorInfo(error);
+            if (errorInfo.code === ErrorCode.USER_NOT_FOUND) {
+              logger.warn('User not found in guild, continuing with basic data', {
+                ...context,
+                metadata: { guildId: sanitizedGuildId }
+              });
+            } else {
+              logger.warn('Failed to fetch guild member data', {
+                ...context,
+                metadata: { error: errorInfo.message }
+              });
+            }
+          }
+        }
+
+        let presence: DiscordPresence | null = null;
+        if (sanitizedGuildId) {
+          try {
+            presence = await this.getPresenceData(sanitizedUserId, sanitizedGuildId, context);
+          } catch (error) {
+            logger.debug('Presence data not available', {
+              ...context,
+              metadata: { reason: (error as Error).message }
+            });
+          }
+        }
+
+        const userData = this.transformUserData(user, guildMember, presence);
+        
+        logger.info('User data fetched successfully', {
+          ...context,
+          metadata: {
+            hasActivities: userData.activities.length > 0,
+            hasPresence: !!userData.presence,
+            status: userData.status
+          }
+        });
+
+        return userData;
+      } catch (error) {
+        const errorInfo = extractErrorInfo(error);
+        
+        logger.error('Failed to fetch user data', {
+          ...context,
+          metadata: {
+            errorCode: errorInfo.code,
+            isRetryable: errorInfo.isRetryable
+          }
+        }, error as Error);
+
+        if (errorInfo.code === ErrorCode.USER_NOT_FOUND) {
+          const notFoundError = new Error(`User with ID ${sanitizedUserId} not found`);
+          (notFoundError as any).code = ErrorCode.USER_NOT_FOUND;
+          throw notFoundError;
+        }
+
+        throw error;
+      }
+    }, DEFAULT_BACKOFF_CONFIGS.discord_api, context);
   }
 
   /**
@@ -208,81 +271,190 @@ export class DiscordClient {
   }
 
   /**
-   * Make authenticated HTTP request to Discord API with rate limiting
+   * Make authenticated HTTP request to Discord API with comprehensive error handling
    */
-  private async makeRequest<T>(endpoint: string): Promise<T> {
-    await this.waitForRateLimit();
-
-    const url = `${this.baseUrl}${endpoint}`;
-    const headers = {
-      'Authorization': `Bot ${this.botToken}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'DiscordBot (discord-bot-api, 1.0.0)'
+  private async makeRequest<T>(endpoint: string, context?: LogContext): Promise<T> {
+    const requestContext = {
+      ...context,
+      operation: 'discord_api_request',
+      metadata: { endpoint }
     };
 
-    try {
-      const response = await fetch(url, { headers });
-      
-      // Handle rate limiting
-      if (response.status === 429) {
-        const retryAfter = parseInt(response.headers.get('retry-after') || '1');
-        await this.handleRateLimit(retryAfter);
-        return this.makeRequest<T>(endpoint); // Retry the request
-      }
+    return this.circuitBreaker.execute(async () => {
+      await this.waitForRateLimit(requestContext);
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw this.createDiscordApiError(response.status, errorData);
-      }
+      const url = `${this.baseUrl}${endpoint}`;
+      const headers = {
+        'Authorization': `Bot ${this.botToken}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'DiscordBot (discord-bot-api, 1.0.0)',
+        'X-RateLimit-Precision': 'millisecond'
+      };
 
-      // Update rate limit tracking
-      this.updateRateLimitTracking(response);
+      const startTime = Date.now();
+      this.requestMetrics.totalRequests++;
 
-      return await response.json() as T;
-    } catch (error) {
-      if (error instanceof TypeError && error.message.includes('fetch')) {
-        throw this.createError(ErrorCode.SERVICE_UNAVAILABLE, 'Unable to connect to Discord API');
+      logger.discordApiRequest(endpoint, 'GET', requestContext);
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        
+        const response = await fetch(url, { 
+          headers,
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        const responseTime = Date.now() - startTime;
+        
+        logger.discordApiResponse(endpoint, response.status, responseTime, requestContext);
+
+        if (response.status === 429) {
+          this.requestMetrics.rateLimitHits++;
+          const retryAfter = parseFloat(response.headers.get('retry-after') || '1');
+          
+          logger.rateLimitHit(retryAfter, {
+            ...requestContext,
+            metadata: {
+              ...requestContext.metadata,
+              global: response.headers.get('x-ratelimit-global') === 'true',
+              bucket: response.headers.get('x-ratelimit-bucket')
+            }
+          });
+
+          await handleDiscordRateLimit(retryAfter, requestContext);
+          return this.makeRequest<T>(endpoint, context); // Retry the request
+        }
+
+        if (!response.ok) {
+          this.requestMetrics.failedRequests++;
+          const errorData = await response.json().catch(() => ({}));
+          const error = this.createDiscordApiError(response.status, errorData);
+          
+          logger.error('Discord API error response', {
+            ...requestContext,
+            metadata: {
+              ...requestContext.metadata,
+              status: response.status,
+              errorData
+            }
+          }, error);
+          
+          throw error;
+        }
+
+        this.updateRateLimitTracking(response, requestContext);
+
+        const data = await response.json() as T;
+        this.requestMetrics.successfulRequests++;
+
+        if (responseTime > 2000) {
+          logger.performance('slow_discord_api_request', responseTime, {
+            ...requestContext,
+            metadata: { ...requestContext.metadata, threshold: 2000 }
+          });
+        }
+
+        return data;
+      } catch (error) {
+        this.requestMetrics.failedRequests++;
+        
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+          const connectionError = this.createError(
+            ErrorCode.SERVICE_UNAVAILABLE, 
+            'Unable to connect to Discord API'
+          );
+          
+          logger.error('Discord API connection failed', {
+            ...requestContext,
+            metadata: { ...requestContext.metadata, networkError: true }
+          }, connectionError);
+          
+          throw connectionError;
+        }
+
+        if (error instanceof Error && error.name === 'AbortError') {
+          const timeoutError = this.createError(
+            ErrorCode.SERVICE_UNAVAILABLE,
+            'Discord API request timed out'
+          );
+          
+          logger.error('Discord API request timeout', {
+            ...requestContext,
+            metadata: { ...requestContext.metadata, timeout: true }
+          }, timeoutError);
+          
+          throw timeoutError;
+        }
+
+        throw error;
       }
-      throw error;
-    }
+    }, requestContext);
   }
 
   /**
    * Get presence data (simplified - in real implementation this would come from gateway)
    */
-  private async getPresenceData(_userId: string, _guildId: string): Promise<DiscordPresence | null> {
-    // Note: Discord API doesn't provide a direct endpoint for presence data via REST
-    // This would typically come from the gateway connection
-    // For now, we'll return null and rely on cached data or gateway events
+  private async getPresenceData(
+    _userId: string, 
+    _guildId: string, 
+    context?: LogContext
+  ): Promise<DiscordPresence | null> {
+    logger.debug('Presence data not available via REST API', {
+      ...context,
+      operation: 'get_presence_data',
+      metadata: { reason: 'REST API limitation' }
+    });
+    
     return null;
   }
 
   /**
-   * Wait for rate limit if necessary
+   * Wait for rate limit if necessary with enhanced tracking
    */
-  private async waitForRateLimit(): Promise<void> {
+  private async waitForRateLimit(context?: LogContext): Promise<void> {
     const now = Date.now();
     
-    // Reset window if a second has passed
     if (now - this.rateLimitConfig.windowStart >= 1000) {
       this.rateLimitConfig.currentRequests = 0;
       this.rateLimitConfig.windowStart = now;
     }
 
-    // Check if we're rate limited
     if (this.rateLimitConfig.isRateLimited && this.rateLimitConfig.rateLimitResetAt) {
       const waitTime = this.rateLimitConfig.rateLimitResetAt - now;
       if (waitTime > 0) {
+        logger.debug('Waiting for rate limit to reset', {
+          ...context,
+          operation: 'rate_limit_wait',
+          metadata: { waitTimeMs: waitTime }
+        });
+        
         await new Promise(resolve => setTimeout(resolve, waitTime));
         this.rateLimitConfig.isRateLimited = false;
         this.rateLimitConfig.rateLimitResetAt = null;
+        
+        logger.debug('Rate limit reset, continuing', {
+          ...context,
+          operation: 'rate_limit_reset'
+        });
       }
     }
 
-    // Check if we've hit the per-second limit
     if (this.rateLimitConfig.currentRequests >= this.rateLimitConfig.maxRequestsPerSecond) {
       const waitTime = 1000 - (now - this.rateLimitConfig.windowStart);
       if (waitTime > 0) {
+        logger.debug('Waiting for rate limit window reset', {
+          ...context,
+          operation: 'rate_limit_window_wait',
+          metadata: { 
+            waitTimeMs: waitTime,
+            currentRequests: this.rateLimitConfig.currentRequests,
+            maxRequests: this.rateLimitConfig.maxRequestsPerSecond
+          }
+        });
+        
         await new Promise(resolve => setTimeout(resolve, waitTime));
         this.rateLimitConfig.currentRequests = 0;
         this.rateLimitConfig.windowStart = Date.now();
@@ -293,30 +465,47 @@ export class DiscordClient {
   }
 
   /**
-   * Handle rate limit response from Discord
+   * Update rate limit tracking based on response headers with enhanced logging
    */
-  private async handleRateLimit(retryAfter: number): Promise<void> {
-    this.rateLimitConfig.isRateLimited = true;
-    this.rateLimitConfig.rateLimitResetAt = Date.now() + (retryAfter * 1000);
-    
-    console.warn(`Discord API rate limited. Waiting ${retryAfter} seconds.`);
-    await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-    
-    this.rateLimitConfig.isRateLimited = false;
-    this.rateLimitConfig.rateLimitResetAt = null;
-  }
-
-  /**
-   * Update rate limit tracking based on response headers
-   */
-  private updateRateLimitTracking(response: Response): void {
+  private updateRateLimitTracking(response: Response, context?: LogContext): void {
     const remaining = response.headers.get('x-ratelimit-remaining');
     const resetAfter = response.headers.get('x-ratelimit-reset-after');
-    
-    if (remaining && parseInt(remaining) === 0 && resetAfter) {
+    const limit = response.headers.get('x-ratelimit-limit');
+    const bucket = response.headers.get('x-ratelimit-bucket');
+
+    if (remaining && resetAfter && limit) {
+      const remainingRequests = parseInt(remaining);
       const resetTime = parseFloat(resetAfter) * 1000;
-      this.rateLimitConfig.isRateLimited = true;
-      this.rateLimitConfig.rateLimitResetAt = Date.now() + resetTime;
+      const totalLimit = parseInt(limit);
+
+      logger.debug('Rate limit info updated', {
+        ...context,
+        operation: 'rate_limit_update',
+        metadata: {
+          remaining: remainingRequests,
+          limit: totalLimit,
+          resetAfterMs: resetTime,
+          bucket,
+          utilizationPercent: Math.round(((totalLimit - remainingRequests) / totalLimit) * 100)
+        }
+      });
+
+      if (remainingRequests <= 5) {
+        logger.warn('Approaching Discord API rate limit', {
+          ...context,
+          operation: 'rate_limit_warning',
+          metadata: {
+            remaining: remainingRequests,
+            limit: totalLimit,
+            resetAfterMs: resetTime
+          }
+        });
+      }
+
+      if (remainingRequests === 0 && resetAfter) {
+        this.rateLimitConfig.isRateLimited = true;
+        this.rateLimitConfig.rateLimitResetAt = Date.now() + resetTime;
+      }
     }
   }
 
@@ -353,7 +542,6 @@ export class DiscordClient {
    */
   private transformActivities(discordActivities: DiscordActivity[]): Activity[] {
     return discordActivities.map(activity => {
-      // Map Discord activity types to our internal types
       let type: Activity['type'];
       switch (activity.type) {
         case 0: type = 'playing'; break;
@@ -382,7 +570,6 @@ export class DiscordClient {
    * Extract Rich Presence data from activities
    */
   private extractRichPresence(activities: Activity[]): RichPresence | null {
-    // Find the first activity that has Rich Presence data
     const richActivity = activities.find(activity => 
       activity.details || activity.state || activity.type === 'playing'
     );
@@ -391,14 +578,10 @@ export class DiscordClient {
       return null;
     }
 
-    // This is a simplified extraction - in a real implementation,
-    // Rich Presence data would come directly from Discord's activity structure
     const result: RichPresence = {};
     
     if (richActivity.details) result.details = richActivity.details;
     if (richActivity.state) result.state = richActivity.state;
-    // Note: Image keys and other Rich Presence fields would need to be extracted
-    // from the original Discord activity structure if available
     
     return result;
   }
@@ -429,5 +612,63 @@ export class DiscordClient {
     (error as any).code = ErrorCode.DISCORD_API_ERROR;
     (error as any).details = discordError;
     return error;
+  }
+
+  /**
+   * Get client metrics for monitoring
+   */
+  getMetrics() {
+    return {
+      requests: { ...this.requestMetrics },
+      rateLimit: {
+        isLimited: this.rateLimitConfig.isRateLimited,
+        resetAt: this.rateLimitConfig.rateLimitResetAt,
+        currentRequests: this.rateLimitConfig.currentRequests,
+        maxRequests: this.rateLimitConfig.maxRequestsPerSecond
+      },
+      circuitBreaker: this.circuitBreaker.getState()
+    };
+  }
+
+  /**
+   * Reset metrics (useful for monitoring systems)
+   */
+  resetMetrics(): void {
+    this.requestMetrics.totalRequests = 0;
+    this.requestMetrics.successfulRequests = 0;
+    this.requestMetrics.failedRequests = 0;
+    this.requestMetrics.rateLimitHits = 0;
+    
+    logger.info('Discord client metrics reset', {
+      component: 'DiscordClient',
+      operation: 'metrics_reset'
+    });
+  }
+
+  /**
+   * Health check for the Discord client
+   */
+  async healthCheck() {
+    const metrics = this.getMetrics();
+    const circuitBreakerOpen = metrics.circuitBreaker.state === 'open';
+    const highFailureRate = metrics.requests.totalRequests > 0 && 
+      (metrics.requests.failedRequests / metrics.requests.totalRequests) > 0.5;
+
+    const healthy = !circuitBreakerOpen && !highFailureRate;
+    
+    let status = 'healthy';
+    if (circuitBreakerOpen) {
+      status = 'circuit_breaker_open';
+    } else if (highFailureRate) {
+      status = 'high_failure_rate';
+    } else if (metrics.rateLimit.isLimited) {
+      status = 'rate_limited';
+    }
+
+    return {
+      healthy,
+      status,
+      metrics
+    };
   }
 }
