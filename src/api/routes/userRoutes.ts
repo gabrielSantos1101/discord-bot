@@ -69,7 +69,7 @@ export class UserRoutes {
         fromCache = true;
       } else {
         userData = await this.discordClient.getUserData(
-          userId, 
+          userId,
           guildId as string | undefined
         );
       }
@@ -212,7 +212,7 @@ export class UserRoutes {
         guildId as string | undefined
       );
 
-      const currentActivity = userData.activities.find(activity => 
+      const currentActivity = userData.activities.find(activity =>
         activity.type !== 'custom'
       ) || userData.activities[0] || null;
 
