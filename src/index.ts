@@ -52,8 +52,18 @@ async function main() {
     console.error('✗ Failed to initialize Discord Client:', error.message);
   }
   
+  // Initialize REST API Service (Task 5.1 - Complete)
+  try {
+    console.log('Initializing REST API Service...');
+    const { ApiServer } = await import('./api');
+    const apiServer = new ApiServer(config);
+    await apiServer.start();
+    console.log(`✓ REST API Service started on port ${config.api.port}`);
+  } catch (error: any) {
+    console.error('✗ Failed to initialize REST API Service:', error.message);
+  }
+  
   // TODO: Initialize remaining services in next tasks
-  // - REST API Service (Task 5)
   // - Database Service
   // - Discord Bot Service (Task 6)
   

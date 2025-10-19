@@ -29,7 +29,9 @@
   - Adicionar autenticação com bot token
   - _Requisitos: 1.1, 1.2, 1.3, 4.1, 4.4_
 
-- [-] 4. Implementar sistema de cache Redis (opcional)
+- [x] 4. Implementar sistema de cache Redis (opcional)
+
+
 
 
 
@@ -40,15 +42,23 @@
   - Adicionar configuração para habilitar/desabilitar cache
   - _Requisitos: 1.4, 4.4_
 
-- [ ] 5. Desenvolver API REST
-- [ ] 5.1 Criar servidor Express e middleware básico
+- [x] 5. Desenvolver API REST
+
+
+
+
+- [x] 5.1 Criar servidor Express e middleware básico
+
+
 
   - Configurar servidor Express com CORS e parsing JSON
   - Implementar middleware de rate limiting (100 req/min por IP)
   - Adicionar middleware de logging e tratamento de erros
   - _Requisitos: 1.4, 4.3_
 
-- [ ] 5.2 Implementar endpoints de usuário
+- [x] 5.2 Implementar endpoints de usuário
+
+
 
   - Criar GET /api/users/{userId}/status (consulta direta ao Discord)
   - Criar GET /api/users/{userId}/activity (consulta direta ao Discord)
@@ -56,7 +66,9 @@
   - Implementar validação de parâmetros e formatação de resposta em tempo real
   - _Requisitos: 1.1, 1.2, 1.3, 2.1, 2.3_
 
-- [ ] 5.3 Adicionar endpoints de configuração
+- [x] 5.3 Adicionar endpoints de configuração
+
+
 
   - Criar POST /api/config/server/{serverId}
   - Implementar GET /api/channels/auto/{templateId}
