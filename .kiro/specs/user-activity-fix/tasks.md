@@ -1,6 +1,9 @@
 # Plano de Implementação - Correção de Captura de Atividades
 
-- [ ] 1. Configurar intents corretos no DiscordBotService
+- [-] 1. Configurar intents corretos no DiscordBotService
+
+
+
   - Adicionar GuildPresences intent na configuração do cliente Discord
   - Implementar validação de intents durante inicialização
   - Adicionar logs informativos sobre status dos intents

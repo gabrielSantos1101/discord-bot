@@ -2,6 +2,7 @@ import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { CacheService } from '../../services/CacheService';
 import { DatabaseService } from '../../services/DatabaseService';
 import { getDiscordConfig } from '../../utils/config';
+import { logger } from '../../utils/logger';
 import { CommandManager } from '../commands/CommandManager';
 import { AutoChannelManager } from '../managers/AutoChannelManager';
 
@@ -26,8 +27,23 @@ export class DiscordBotService {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildPresences
       ]
+    });
+
+    logger.info('Discord client initialized with intents', {
+      component: 'DiscordBotService',
+      operation: 'initialization',
+      metadata: {
+        intents: [
+          'Guilds',
+          'GuildVoiceStates', 
+          'GuildMessages',
+          'MessageContent',
+          'GuildPresences'
+        ]
+      }
     });
 
     this.setupEventListeners();
@@ -44,23 +60,115 @@ export class DiscordBotService {
   }
 
   /**
+   * Validate that required intents are properly configured and accessible
+   */
+  private async validateIntents(): Promise<void> {
+    try {
+      logger.info('Validating Discord intents', {
+        component: 'DiscordBotService',
+        operation: 'intent_validation'
+      });
+
+      const guilds = this.client.guilds.cache;
+      if (guilds.size === 0) {
+        logger.warn('No guilds available for intent validation', {
+          component: 'DiscordBotService',
+          operation: 'intent_validation'
+        });
+        return;
+      }
+
+      const testGuild = guilds.first();
+      if (testGuild) {
+        const presences = testGuild.presences.cache;
+        
+        logger.info('GuildPresences intent validation', {
+          component: 'DiscordBotService',
+          operation: 'intent_validation',
+          guildId: testGuild.id,
+          metadata: {
+            guildName: testGuild.name,
+            presencesCount: presences.size,
+            membersCount: testGuild.memberCount
+          }
+        });
+
+        if (presences.size === 0 && testGuild.memberCount && testGuild.memberCount > 1) {
+          logger.warn('GuildPresences intent may not be enabled - no presence data available despite having members', {
+            component: 'DiscordBotService',
+            operation: 'intent_validation',
+            guildId: testGuild.id,
+            metadata: {
+              recommendation: 'Enable GuildPresences intent in Discord Developer Portal'
+            }
+          });
+        } else {
+          logger.info('GuildPresences intent appears to be working correctly', {
+            component: 'DiscordBotService',
+            operation: 'intent_validation',
+            metadata: {
+              presencesAvailable: presences.size > 0
+            }
+          });
+        }
+
+        logger.info('Intent validation summary', {
+          component: 'DiscordBotService',
+          operation: 'intent_validation',
+          metadata: {
+            guildsAccess: guilds.size > 0,
+            voiceStatesAccess: testGuild.voiceStates.cache.size >= 0,
+            messagesAccess: true,
+            presencesAccess: presences.size > 0
+          }
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to validate intents', {
+        component: 'DiscordBotService',
+        operation: 'intent_validation',
+        metadata: {
+          recommendation: 'Check Discord Developer Portal settings and bot permissions'
+        }
+      }, error as Error);
+    }
+  }
+
+  /**
    * Handle bot ready event
    */
   private async onReady(client: Client): Promise<void> {
-    console.log(`Discord bot ready! Logged in as ${client.user?.tag}`);
+    logger.info('Discord bot ready', {
+      component: 'DiscordBotService',
+      operation: 'ready',
+      metadata: {
+        botTag: client.user?.tag,
+        botId: client.user?.id
+      }
+    });
     
     try {
-      // Initialize managers
+      await this.validateIntents();
+
       this.autoChannelManager = new AutoChannelManager(this.client, this.cacheService);
       this.commandManager = new CommandManager(this.client, this.databaseService);
 
-      // Load configurations for all servers
       await this.loadAllServerConfigurations();
 
       this.isReady = true;
-      console.log('Discord bot service fully initialized');
+      logger.info('Discord bot service fully initialized', {
+        component: 'DiscordBotService',
+        operation: 'initialization_complete',
+        metadata: {
+          guilds: this.client.guilds.cache.size,
+          users: this.client.users.cache.size
+        }
+      });
     } catch (error) {
-      console.error('Error initializing bot service:', error);
+      logger.error('Error initializing bot service', {
+        component: 'DiscordBotService',
+        operation: 'initialization'
+      }, error as Error);
     }
   }
 
@@ -68,14 +176,23 @@ export class DiscordBotService {
    * Handle bot errors
    */
   private onError(error: Error): void {
-    console.error('Discord client error:', error);
+    logger.error('Discord client error', {
+      component: 'DiscordBotService',
+      operation: 'client_error'
+    }, error);
   }
 
   /**
    * Handle bot warnings
    */
   private onWarn(warning: string): void {
-    console.warn('Discord client warning:', warning);
+    logger.warn('Discord client warning', {
+      component: 'DiscordBotService',
+      operation: 'client_warning',
+      metadata: {
+        warning: warning
+      }
+    });
   }
 
   /**
@@ -85,7 +202,6 @@ export class DiscordBotService {
     console.log(`Joined new guild: ${guild.name} (${guild.id})`);
     
     try {
-      // Create default configuration for new guild
       await this.databaseService.createDefaultServerConfig(guild.id);
       console.log(`Created default configuration for guild ${guild.id}`);
     } catch (error) {
@@ -101,26 +217,21 @@ export class DiscordBotService {
       const serverIds = await this.databaseService.getAllServerIds();
       const botGuilds = this.client.guilds.cache.map(guild => guild.id);
 
-      // Load configurations for servers bot is currently in
       for (const guildId of botGuilds) {
         let serverConfig = await this.databaseService.getServerConfig(guildId);
-        
-        // Create default config if none exists
+
         if (!serverConfig) {
           serverConfig = await this.databaseService.createDefaultServerConfig(guildId);
         }
 
-        // Load channel configurations into AutoChannelManager
         if (this.autoChannelManager && serverConfig.enabled) {
           this.autoChannelManager.loadChannelConfigs(serverConfig.autoChannels);
         }
       }
 
-      // Clean up configurations for servers bot is no longer in
       for (const serverId of serverIds) {
         if (!botGuilds.includes(serverId)) {
           console.log(`Bot no longer in server ${serverId}, keeping config for potential rejoin`);
-          // Note: We keep the config in case the bot rejoins the server later
         }
       }
 
@@ -141,12 +252,10 @@ export class DiscordBotService {
         return;
       }
 
-      // Reload channel configurations in AutoChannelManager
       if (this.autoChannelManager) {
         this.autoChannelManager.loadChannelConfigs(serverConfig.autoChannels);
       }
 
-      // Notify command manager of config reload
       if (this.commandManager) {
         await this.commandManager.reloadServerConfig(serverId);
       }
@@ -163,10 +272,23 @@ export class DiscordBotService {
    */
   public async start(): Promise<void> {
     try {
+      logger.info('Starting Discord bot', {
+        component: 'DiscordBotService',
+        operation: 'start'
+      });
+
       const config = getDiscordConfig();
       await this.client.login(config.botToken);
+      
+      logger.info('Discord bot login successful', {
+        component: 'DiscordBotService',
+        operation: 'login'
+      });
     } catch (error) {
-      console.error('Failed to start Discord bot:', error);
+      logger.error('Failed to start Discord bot', {
+        component: 'DiscordBotService',
+        operation: 'start'
+      }, error as Error);
       throw error;
     }
   }
