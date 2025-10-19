@@ -33,14 +33,22 @@
     - Implementar tratamento de erros para eventos perdidos
     - _Requisitos: 1.2, 1.3, 5.4_
 
-- [ ] 3. Melhorar CacheService para dados de presença
-  - [ ] 3.1 Estender interface do CacheService
+- [x] 3. Melhorar CacheService para dados de presença
+
+
+
+
+  - [x] 3.1 Estender interface do CacheService
+
+
     - Adicionar métodos setUserPresence e getUserPresence
     - Implementar operações batch para performance
     - Configurar TTL apropriado para diferentes tipos de dados
     - _Requisitos: 1.3, 4.3, 5.1_
 
-  - [ ] 3.2 Implementar cache em memória como fallback
+  - [x] 3.2 Implementar cache em memória como fallback
+
+
     - Criar Map em memória para quando Redis não estiver disponível
     - Adicionar limpeza automática de dados antigos
     - Implementar sincronização entre cache Redis e memória
