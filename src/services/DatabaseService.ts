@@ -1,18 +1,21 @@
-import { Database, open } from 'sqlite';
-import sqlite3 from 'sqlite3';
+import { Pool } from 'pg';
 import { ChannelConfig } from '../models/ChannelConfig';
 import { ServerConfig } from '../models/ServerConfig';
 import { validateChannelConfig, validateServerConfig } from '../models/validators/ConfigValidator';
+import { logger } from '../utils/logger';
 
 /**
- * Database service for managing server and channel configurations
+ * Database service for managing server and channel configurations using PostgreSQL
  */
 export class DatabaseService {
-  private db: Database<sqlite3.Database, sqlite3.Statement> | null = null;
-  private dbPath: string;
+  private pool: Pool | null = null;
+  private connectionString: string;
 
-  constructor(dbPath: string = './data/bot-config.db') {
-    this.dbPath = dbPath;
+  constructor(connectionString?: string) {
+    this.connectionString = connectionString || process.env['DATABASE_URL'] || '';
+    if (!this.connectionString) {
+      throw new Error('Database connection string is required');
+    }
   }
 
   /**
@@ -20,185 +23,215 @@ export class DatabaseService {
    */
   async initialize(): Promise<void> {
     try {
-      this.db = await open({
-        filename: this.dbPath,
-        driver: sqlite3.Database
+      this.pool = new Pool({
+        connectionString: this.connectionString,
+        ssl: {
+          rejectUnauthorized: false
+        }
       });
 
+      // Test connection
+      const client = await this.pool.connect();
+      client.release();
+
       await this.createTables();
-      console.log('Database initialized successfully');
+      logger.info('Database initialized successfully');
     } catch (error) {
-      console.error('Failed to initialize database:', error);
+      logger.error('Failed to initialize database:', {
+        operation: 'database_init_error',
+        metadata: { error: error instanceof Error ? error.message : String(error) }
+      });
       throw error;
     }
   }
 
   /**
-   * Create necessary database tables
+   * Create database tables if they don't exist
    */
   private async createTables(): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
-    // Server configurations table
-    await this.db.exec(`
-      CREATE TABLE IF NOT EXISTS server_configs (
-        server_id TEXT PRIMARY KEY,
-        command_prefix TEXT NOT NULL DEFAULT '!',
-        enabled BOOLEAN NOT NULL DEFAULT 1,
-        timezone TEXT NOT NULL DEFAULT 'UTC',
-        admin_roles TEXT NOT NULL DEFAULT '[]',
-        api_access_enabled BOOLEAN NOT NULL DEFAULT 1,
-        api_allowed_endpoints TEXT NOT NULL DEFAULT '[]',
-        api_rate_limit INTEGER NOT NULL DEFAULT 100,
-        api_allowed_ips TEXT NOT NULL DEFAULT '[]',
-        logging_level TEXT NOT NULL DEFAULT 'info',
-        logging_channels TEXT NOT NULL DEFAULT '[]',
-        logging_user_activities BOOLEAN NOT NULL DEFAULT 0,
-        logging_channel_operations BOOLEAN NOT NULL DEFAULT 1,
-        last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    const client = await this.pool.connect();
+    try {
+      // Server configurations table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS server_configs (
+          server_id VARCHAR(20) PRIMARY KEY,
+          command_prefix VARCHAR(5) NOT NULL DEFAULT '!',
+          enabled BOOLEAN NOT NULL DEFAULT true,
+          timezone VARCHAR(50) NOT NULL DEFAULT 'UTC',
+          admin_roles JSONB NOT NULL DEFAULT '[]',
+          api_access_enabled BOOLEAN NOT NULL DEFAULT true,
+          api_allowed_endpoints JSONB NOT NULL DEFAULT '[]',
+          api_rate_limit INTEGER NOT NULL DEFAULT 100,
+          api_allowed_ips JSONB NOT NULL DEFAULT '[]',
+          logging_level VARCHAR(20) NOT NULL DEFAULT 'info',
+          logging_channels JSONB NOT NULL DEFAULT '[]',
+          logging_user_activities BOOLEAN NOT NULL DEFAULT false,
+          logging_channel_operations BOOLEAN NOT NULL DEFAULT true,
+          last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
 
-    // Channel configurations table
-    await this.db.exec(`
-      CREATE TABLE IF NOT EXISTS channel_configs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        server_id TEXT NOT NULL,
-        template_channel_id TEXT NOT NULL,
-        name_pattern TEXT NOT NULL,
-        max_channels INTEGER NOT NULL DEFAULT 10,
-        empty_timeout INTEGER NOT NULL DEFAULT 5,
-        category_id TEXT,
-        enabled BOOLEAN NOT NULL DEFAULT 1,
-        user_limit INTEGER NOT NULL DEFAULT 0,
-        permissions TEXT NOT NULL DEFAULT '[]',
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (server_id) REFERENCES server_configs (server_id) ON DELETE CASCADE,
-        UNIQUE(server_id, template_channel_id)
-      )
-    `);
+      // Channel configurations table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS channel_configs (
+          id SERIAL PRIMARY KEY,
+          server_id VARCHAR(20) NOT NULL,
+          template_channel_id VARCHAR(20) NOT NULL,
+          name_pattern VARCHAR(100) NOT NULL,
+          max_channels INTEGER NOT NULL DEFAULT 10,
+          empty_timeout INTEGER NOT NULL DEFAULT 5,
+          category_id VARCHAR(20),
+          enabled BOOLEAN NOT NULL DEFAULT true,
+          user_limit INTEGER NOT NULL DEFAULT 0,
+          permissions JSONB NOT NULL DEFAULT '[]',
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (server_id) REFERENCES server_configs (server_id) ON DELETE CASCADE,
+          UNIQUE(server_id, template_channel_id)
+        )
+      `);
 
-    // Create indexes for better performance
-    await this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_server_configs_server_id ON server_configs(server_id);
-      CREATE INDEX IF NOT EXISTS idx_channel_configs_server_id ON channel_configs(server_id);
-      CREATE INDEX IF NOT EXISTS idx_channel_configs_template_id ON channel_configs(template_channel_id);
-    `);
+      // Create indexes for better performance
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_server_configs_server_id ON server_configs(server_id);
+        CREATE INDEX IF NOT EXISTS idx_channel_configs_server_id ON channel_configs(server_id);
+        CREATE INDEX IF NOT EXISTS idx_channel_configs_template_id ON channel_configs(template_channel_id);
+      `);
+
+      logger.info('Database tables created successfully', {
+        operation: 'create_tables_success'
+      });
+    } finally {
+      client.release();
+    }
   }
 
   /**
    * Get server configuration by server ID
    */
   async getServerConfig(serverId: string): Promise<ServerConfig | null> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
-      const row = await this.db.get(`
-        SELECT * FROM server_configs WHERE server_id = ?
-      `, serverId);
+      const result = await client.query(`
+        SELECT * FROM server_configs WHERE server_id = $1
+      `, [serverId]);
 
-      if (!row) return null;
+      if (result.rows.length === 0) {
+        return null;
+      }
 
-      const config: ServerConfig = {
+      const row = result.rows[0];
+      return {
         serverId: row.server_id,
         commandPrefix: row.command_prefix,
-        enabled: Boolean(row.enabled),
+        enabled: row.enabled,
         timezone: row.timezone,
-        adminRoles: JSON.parse(row.admin_roles),
+        adminRoles: row.admin_roles || [],
         apiAccess: {
-          enabled: Boolean(row.api_access_enabled),
-          allowedEndpoints: JSON.parse(row.api_allowed_endpoints),
+          enabled: row.api_access_enabled,
+          allowedEndpoints: row.api_allowed_endpoints || [],
           rateLimit: row.api_rate_limit,
-          allowedIPs: JSON.parse(row.api_allowed_ips)
+          allowedIPs: row.api_allowed_ips || []
         },
         logging: {
-          level: row.logging_level as any,
-          channels: JSON.parse(row.logging_channels),
-          logUserActivities: Boolean(row.logging_user_activities),
-          logChannelOperations: Boolean(row.logging_channel_operations)
+          level: row.logging_level,
+          channels: row.logging_channels || [],
+          logUserActivities: row.logging_user_activities,
+          logChannelOperations: row.logging_channel_operations
         },
-        autoChannels: await this.getChannelConfigs(serverId),
-        lastUpdated: new Date(row.last_updated)
+        autoChannels: [],
+        lastUpdated: row.last_updated
       };
-
-      return config;
-    } catch (error) {
-      console.error('Error getting server config:', error);
-      throw error;
+    } finally {
+      client.release();
     }
-  }
-
-  /**
-   * Save or update server configuration
+  }  /**
+ 
+  * Save server configuration
    */
   async saveServerConfig(config: ServerConfig): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
     // Validate configuration
-    const errors = validateServerConfig(config);
-    if (errors.length > 0) {
-      throw new Error(`Invalid server config: ${errors.map(e => e.message).join(', ')}`);
+    const validation = validateServerConfig(config);
+    if (validation.length > 0) {
+      throw new Error(`Invalid server configuration: ${validation.map(v => v.message).join(', ')}`);
     }
 
+    const client = await this.pool.connect();
     try {
-      await this.db.run(`
-        INSERT OR REPLACE INTO server_configs (
+      await client.query(`
+        INSERT INTO server_configs (
           server_id, command_prefix, enabled, timezone, admin_roles,
           api_access_enabled, api_allowed_endpoints, api_rate_limit, api_allowed_ips,
           logging_level, logging_channels, logging_user_activities, logging_channel_operations,
           last_updated
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (server_id) DO UPDATE SET
+          command_prefix = EXCLUDED.command_prefix,
+          enabled = EXCLUDED.enabled,
+          timezone = EXCLUDED.timezone,
+          admin_roles = EXCLUDED.admin_roles,
+          api_access_enabled = EXCLUDED.api_access_enabled,
+          api_allowed_endpoints = EXCLUDED.api_allowed_endpoints,
+          api_rate_limit = EXCLUDED.api_rate_limit,
+          api_allowed_ips = EXCLUDED.api_allowed_ips,
+          logging_level = EXCLUDED.logging_level,
+          logging_channels = EXCLUDED.logging_channels,
+          logging_user_activities = EXCLUDED.logging_user_activities,
+          logging_channel_operations = EXCLUDED.logging_channel_operations,
+          last_updated = EXCLUDED.last_updated
       `, [
         config.serverId,
         config.commandPrefix,
-        config.enabled ? 1 : 0,
+        config.enabled,
         config.timezone,
         JSON.stringify(config.adminRoles),
-        config.apiAccess.enabled ? 1 : 0,
+        config.apiAccess.enabled,
         JSON.stringify(config.apiAccess.allowedEndpoints),
         config.apiAccess.rateLimit,
         JSON.stringify(config.apiAccess.allowedIPs),
         config.logging.level,
         JSON.stringify(config.logging.channels),
-        config.logging.logUserActivities ? 1 : 0,
-        config.logging.logChannelOperations ? 1 : 0
+        config.logging.logUserActivities,
+        config.logging.logChannelOperations,
+        new Date()
       ]);
-
-      // Save channel configurations
-      await this.saveChannelConfigs(config.serverId, config.autoChannels);
-    } catch (error) {
-      console.error('Error saving server config:', error);
-      throw error;
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Get channel configurations for a server
+   * Get all channel configurations for a server
    */
   async getChannelConfigs(serverId: string): Promise<ChannelConfig[]> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
-      const rows = await this.db.all(`
-        SELECT * FROM channel_configs WHERE server_id = ? ORDER BY created_at
-      `, serverId);
+      const result = await client.query(`
+        SELECT * FROM channel_configs WHERE server_id = $1 ORDER BY created_at
+      `, [serverId]);
 
-      return rows.map(row => ({
+      return result.rows.map(row => ({
         templateChannelId: row.template_channel_id,
         serverId: row.server_id,
         namePattern: row.name_pattern,
         maxChannels: row.max_channels,
         emptyTimeout: row.empty_timeout,
         categoryId: row.category_id,
-        enabled: Boolean(row.enabled),
+        enabled: row.enabled,
         userLimit: row.user_limit,
-        permissions: JSON.parse(row.permissions)
+        permissions: row.permissions || []
       }));
-    } catch (error) {
-      console.error('Error getting channel configs:', error);
-      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -206,65 +239,77 @@ export class DatabaseService {
    * Save channel configurations for a server
    */
   async saveChannelConfigs(serverId: string, configs: ChannelConfig[]): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
       // Start transaction
-      await this.db.run('BEGIN TRANSACTION');
+      await client.query('BEGIN');
 
       // Delete existing configurations for this server
-      await this.db.run('DELETE FROM channel_configs WHERE server_id = ?', serverId);
+      await client.query('DELETE FROM channel_configs WHERE server_id = $1', [serverId]);
 
       // Insert new configurations
       for (const config of configs) {
         // Validate configuration
-        const errors = validateChannelConfig(config);
-        if (errors.length > 0) {
-          throw new Error(`Invalid channel config: ${errors.map(e => e.message).join(', ')}`);
+        const validation = validateChannelConfig(config);
+        if (validation.length > 0) {
+          throw new Error(`Invalid channel configuration: ${validation.map(v => v.message).join(', ')}`);
         }
 
-        await this.db.run(`
+        await client.query(`
           INSERT INTO channel_configs (
             server_id, template_channel_id, name_pattern, max_channels, empty_timeout,
-            category_id, enabled, user_limit, permissions, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            category_id, enabled, user_limit, permissions, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         `, [
-          config.serverId,
+          serverId,
           config.templateChannelId,
           config.namePattern,
           config.maxChannels,
           config.emptyTimeout,
-          config.categoryId || null,
-          config.enabled ? 1 : 0,
+          config.categoryId,
+          config.enabled,
           config.userLimit,
-          JSON.stringify(config.permissions)
+          JSON.stringify(config.permissions),
+          new Date(),
+          new Date()
         ]);
       }
 
       // Commit transaction
-      await this.db.run('COMMIT');
+      await client.query('COMMIT');
     } catch (error) {
       // Rollback on error
-      await this.db.run('ROLLBACK');
-      console.error('Error saving channel configs:', error);
+      await client.query('ROLLBACK');
+      logger.error('Error saving channel configs:', {
+        operation: 'save_channel_configs_error',
+        metadata: { error: error instanceof Error ? error.message : String(error) }
+      });
       throw error;
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Get a specific channel configuration
+   * Get specific channel configuration
    */
   async getChannelConfig(serverId: string, templateChannelId: string): Promise<ChannelConfig | null> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
-      const row = await this.db.get(`
+      const result = await client.query(`
         SELECT * FROM channel_configs 
-        WHERE server_id = ? AND template_channel_id = ?
-      `, serverId, templateChannelId);
+        WHERE server_id = $1 AND template_channel_id = $2
+      `, [serverId, templateChannelId]);
 
-      if (!row) return null;
+      if (result.rows.length === 0) {
+        return null;
+      }
 
+      const row = result.rows[0];
       return {
         templateChannelId: row.template_channel_id,
         serverId: row.server_id,
@@ -272,45 +317,50 @@ export class DatabaseService {
         maxChannels: row.max_channels,
         emptyTimeout: row.empty_timeout,
         categoryId: row.category_id,
-        enabled: Boolean(row.enabled),
+        enabled: row.enabled,
         userLimit: row.user_limit,
-        permissions: JSON.parse(row.permissions)
+        permissions: row.permissions || []
       };
-    } catch (error) {
-      console.error('Error getting channel config:', error);
-      throw error;
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Delete a channel configuration
+   * Delete channel configuration
    */
   async deleteChannelConfig(serverId: string, templateChannelId: string): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
-      await this.db.run(`
+      await client.query(`
         DELETE FROM channel_configs 
-        WHERE server_id = ? AND template_channel_id = ?
-      `, serverId, templateChannelId);
-    } catch (error) {
-      console.error('Error deleting channel config:', error);
-      throw error;
+        WHERE server_id = $1 AND template_channel_id = $2
+      `, [serverId, templateChannelId]);
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Get all server IDs that have configurations
+   * Get all server IDs
    */
   async getAllServerIds(): Promise<string[]> {
-    if (!this.db) throw new Error('Database not initialized');
+    if (!this.pool) throw new Error('Database not initialized');
 
+    const client = await this.pool.connect();
     try {
-      const rows = await this.db.all('SELECT server_id FROM server_configs');
-      return rows.map(row => row.server_id);
+      const result = await client.query('SELECT server_id FROM server_configs');
+      return result.rows.map(row => row.server_id);
     } catch (error) {
-      console.error('Error getting server IDs:', error);
+      logger.error('Error getting all server IDs:', {
+        operation: 'get_all_server_ids_error',
+        metadata: { error: error instanceof Error ? error.message : String(error) }
+      });
       throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -348,9 +398,9 @@ export class DatabaseService {
    * Close database connection
    */
   async close(): Promise<void> {
-    if (this.db) {
-      await this.db.close();
-      this.db = null;
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
     }
   }
 }

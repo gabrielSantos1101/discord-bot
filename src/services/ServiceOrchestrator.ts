@@ -138,8 +138,8 @@ export class ServiceOrchestrator {
         operation: 'database_start'
       });
 
-      const dbPath = process.env['DATABASE_PATH'] || './data/bot-config.db';
-      this.databaseService = new DatabaseService(dbPath);
+      const connectionString = process.env['DATABASE_URL'];
+      this.databaseService = new DatabaseService(connectionString);
       await this.databaseService.initialize();
       
       this.services.set('database', this.databaseService);
