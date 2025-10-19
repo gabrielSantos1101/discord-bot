@@ -140,6 +140,7 @@ describe('CacheService', () => {
         CacheKeys.USER_STATUS(userId),
         CacheKeys.USER_ACTIVITY(userId),
         CacheKeys.USER_PRESENCE(userId),
+        CacheKeys.USER_PRESENCE_DATA(userId),
       ]);
     });
   });

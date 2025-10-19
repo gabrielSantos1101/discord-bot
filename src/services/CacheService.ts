@@ -57,7 +57,7 @@ export class CacheService {
 
     try {
       let redisConfig: any;
-      
+
       if (this.config.redisUrl) {
         redisConfig = {
           url: this.config.redisUrl,
@@ -143,7 +143,7 @@ export class CacheService {
       const key = CacheKeys.USER_STATUS(userId);
       const value = JSON.stringify(data);
       const expiry = ttl || CacheTTL.USER_STATUS;
-      
+
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
       console.error('Error setting user status in cache:', error);
@@ -175,7 +175,7 @@ export class CacheService {
       const key = CacheKeys.USER_ACTIVITY(userId);
       const value = JSON.stringify(data);
       const expiry = ttl || CacheTTL.USER_ACTIVITY;
-      
+
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
       console.error('Error setting user activity in cache:', error);
@@ -207,7 +207,7 @@ export class CacheService {
       const key = CacheKeys.USER_PRESENCE(userId);
       const value = JSON.stringify(data);
       const expiry = ttl || CacheTTL.USER_PRESENCE;
-      
+
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
       console.error('Error setting user presence in cache:', error);
@@ -239,7 +239,7 @@ export class CacheService {
       const key = CacheKeys.AUTO_CHANNELS(templateId);
       const value = JSON.stringify(channelIds);
       const expiry = ttl || CacheTTL.AUTO_CHANNELS;
-      
+
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
       console.error('Error setting auto channels in cache:', error);
@@ -271,7 +271,7 @@ export class CacheService {
       const key = CacheKeys.SERVER_CONFIG(serverId);
       const value = JSON.stringify(config);
       const expiry = ttl || CacheTTL.SERVER_CONFIG;
-      
+
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
       console.error('Error setting server config in cache:', error);
@@ -287,7 +287,7 @@ export class CacheService {
     try {
       const cached = await this.client!.get(CacheKeys.USER_PRESENCE_DATA(userId));
       if (!cached) return null;
-      
+
       const data = JSON.parse(cached);
       if (data && data.lastUpdated) {
         const lastUpdatedStr = data.lastUpdated as string;
@@ -319,7 +319,7 @@ export class CacheService {
         ...data,
         lastUpdated: data.lastUpdated.toISOString()
       };
-      
+
       const value = JSON.stringify(serializedData);
       await this.client!.setEx(key, expiry, value);
     } catch (error) {
@@ -332,7 +332,7 @@ export class CacheService {
    */
   async getUserPresencesBatch(userIds: string[]): Promise<Map<string, UserActivityData>> {
     const result = new Map<string, UserActivityData>();
-    
+
     if (!this.isAvailable() || userIds.length === 0) {
       return result;
     }
@@ -340,7 +340,7 @@ export class CacheService {
     try {
       const keys = userIds.map(userId => CacheKeys.USER_PRESENCE_DATA(userId));
       const values = await this.client!.mGet(keys);
-      
+
       for (let i = 0; i < userIds.length; i++) {
         const userId = userIds[i];
         const value = values[i];
@@ -385,7 +385,7 @@ export class CacheService {
 
     try {
       const pipeline = this.client!.multi();
-      
+
       for (const [userId, data] of presences.entries()) {
         try {
           const key = CacheKeys.USER_PRESENCE_DATA(userId);
@@ -394,7 +394,7 @@ export class CacheService {
             ...data,
             lastUpdated: data.lastUpdated.toISOString()
           };
-          
+
           const value = JSON.stringify(serializedData);
           pipeline.setEx(key, expiry, value);
           result.success.push(userId);
@@ -405,7 +405,7 @@ export class CacheService {
           });
         }
       }
-      
+
       await pipeline.exec();
     } catch (error) {
       console.error('Error setting multiple user presences in cache:', error);
@@ -450,14 +450,14 @@ export class CacheService {
   private cleanupMemoryCache(): void {
     const now = Date.now();
     let cleanedCount = 0;
-    
+
     for (const [key, entry] of this.memoryCache.entries()) {
       if (now > entry.expiry) {
         this.memoryCache.delete(key);
         cleanedCount++;
       }
     }
-    
+
     if (cleanedCount > 0) {
       console.log(`Cleaned up ${cleanedCount} expired entries from memory cache`);
     }
@@ -469,14 +469,14 @@ export class CacheService {
   private getFromMemoryCache(userId: string): UserActivityData | null {
     const key = CacheKeys.USER_PRESENCE_DATA(userId);
     const entry = this.memoryCache.get(key);
-    
+
     if (!entry) return null;
 
     if (Date.now() > entry.expiry) {
       this.memoryCache.delete(key);
       return null;
     }
-    
+
     return entry.data;
   }
 
@@ -486,7 +486,7 @@ export class CacheService {
   private setInMemoryCache(userId: string, data: UserActivityData, ttlSeconds: number): void {
     const key = CacheKeys.USER_PRESENCE_DATA(userId);
     const expiry = Date.now() + (ttlSeconds * 1000);
-    
+
     this.memoryCache.set(key, { data, expiry });
   }
 
@@ -532,7 +532,7 @@ export class CacheService {
    */
   async getUserPresencesBatchWithFallback(userIds: string[]): Promise<Map<string, UserActivityData>> {
     const result = new Map<string, UserActivityData>();
-    
+
     if (userIds.length === 0) return result;
 
     if (this.isAvailable()) {
@@ -552,7 +552,7 @@ export class CacheService {
             result.set(userId, memoryData);
           }
         }
-        
+
         return result;
       } catch (error) {
         console.warn('Redis batch operation failed, falling back to memory cache:', error);
@@ -565,7 +565,7 @@ export class CacheService {
         result.set(userId, memoryData);
       }
     }
-    
+
     return result;
   }
 
@@ -577,7 +577,7 @@ export class CacheService {
       success: [],
       failed: []
     };
-    
+
     if (presences.size === 0) return result;
 
     for (const [userId, data] of presences.entries()) {
@@ -601,7 +601,7 @@ export class CacheService {
         console.warn('Failed to sync batch data to Redis, data saved in memory only:', error);
       }
     }
-    
+
     return result;
   }
 
@@ -618,7 +618,7 @@ export class CacheService {
         CacheKeys.USER_PRESENCE(userId),
         CacheKeys.USER_PRESENCE_DATA(userId)
       ];
-      
+
       await this.client!.del(keys);
     } catch (error) {
       console.error('Error invalidating user cache:', error);
@@ -641,9 +641,9 @@ export class CacheService {
   /**
    * Get cache statistics
    */
-  async getStats(): Promise<{ 
-    connected: boolean; 
-    keyCount?: number; 
+  async getStats(): Promise<{
+    connected: boolean;
+    keyCount?: number;
     memory?: string;
     memoryCache?: {
       entries: number;
@@ -674,7 +674,7 @@ export class CacheService {
         result.connected = false;
       }
     }
-    
+
     return result;
   }
 
@@ -688,7 +688,7 @@ export class CacheService {
     }
 
     this.memoryCache.clear();
-    
+
     if (this.client) {
       try {
         await this.client.quit();
