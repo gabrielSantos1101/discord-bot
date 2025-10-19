@@ -4,6 +4,7 @@ import { DatabaseService } from '../../services/DatabaseService';
 import { getDiscordConfig } from '../../utils/config';
 import { logger } from '../../utils/logger';
 import { CommandManager } from '../commands/CommandManager';
+import { PresenceEventHandler } from '../handlers/PresenceEventHandler';
 import { AutoChannelManager } from '../managers/AutoChannelManager';
 
 /**
@@ -13,6 +14,7 @@ export class DiscordBotService {
   private client: Client;
   private autoChannelManager: AutoChannelManager | null = null;
   private commandManager: CommandManager | null = null;
+  private presenceEventHandler: PresenceEventHandler | null = null;
   private databaseService: DatabaseService;
   private cacheService: CacheService;
   private isReady = false;
@@ -20,8 +22,7 @@ export class DiscordBotService {
   constructor(databaseService: DatabaseService, cacheService: CacheService) {
     this.databaseService = databaseService;
     this.cacheService = cacheService;
-    
-    // Initialize Discord client with required intents
+
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -57,6 +58,7 @@ export class DiscordBotService {
     this.client.on(Events.Error, this.onError.bind(this));
     this.client.on(Events.Warn, this.onWarn.bind(this));
     this.client.on(Events.GuildCreate, this.onGuildJoin.bind(this));
+    this.client.on(Events.PresenceUpdate, this.onPresenceUpdate.bind(this));
   }
 
   /**
@@ -152,8 +154,10 @@ export class DiscordBotService {
 
       this.autoChannelManager = new AutoChannelManager(this.client, this.cacheService);
       this.commandManager = new CommandManager(this.client, this.databaseService);
+      this.presenceEventHandler = new PresenceEventHandler(this.cacheService);
 
       await this.loadAllServerConfigurations();
+      this.setupPresenceRecovery();
 
       this.isReady = true;
       logger.info('Discord bot service fully initialized', {
@@ -206,6 +210,36 @@ export class DiscordBotService {
       console.log(`Created default configuration for guild ${guild.id}`);
     } catch (error) {
       console.error('Error creating default config for new guild:', error);
+    }
+  }
+
+  /**
+   * Handle presence update events
+   */
+  private async onPresenceUpdate(oldPresence: any, newPresence: any): Promise<void> {
+    try {
+      if (!this.presenceEventHandler) {
+        logger.warn('Presence event handler not initialized', {
+          component: 'DiscordBotService',
+          operation: 'presence_update',
+          userId: newPresence?.userId
+        });
+        return;
+      }
+
+      if (!newPresence || !newPresence.guild) {
+        return;
+      }
+
+      await this.presenceEventHandler.handlePresenceUpdate(oldPresence, newPresence);
+      
+    } catch (error) {
+      logger.error('Error processing presence update event', {
+        component: 'DiscordBotService',
+        operation: 'presence_update',
+        userId: newPresence?.userId,
+        guildId: newPresence?.guild?.id
+      }, error as Error);
     }
   }
 
@@ -302,6 +336,10 @@ export class DiscordBotService {
         this.autoChannelManager.stop();
       }
 
+      if (this.presenceEventHandler) {
+        this.presenceEventHandler.clearCache();
+      }
+
       if (this.client) {
         await this.client.destroy();
       }
@@ -344,5 +382,67 @@ export class DiscordBotService {
    */
   public getClient(): Client {
     return this.client;
+  }
+
+  /**
+   * Get presence event handler (for external access)
+   */
+  public getPresenceEventHandler(): PresenceEventHandler | null {
+    return this.presenceEventHandler;
+  }
+
+  /**
+   * Setup periodic presence recovery to handle missed events
+   */
+  private setupPresenceRecovery(): void {
+    setInterval(async () => {
+      try {
+        await this.syncGuildPresences();
+      } catch (error) {
+        logger.error('Presence recovery failed', {
+          component: 'DiscordBotService',
+          operation: 'recovery_sync'
+        }, error as Error);
+      }
+    }, 5 * 60 * 1000); // Every 5 minutes
+  }
+
+  /**
+   * Synchronize presence data for all guild members
+   */
+  private async syncGuildPresences(): Promise<void> {
+    if (!this.presenceEventHandler || !this.isReady) {
+      return;
+    }
+
+    try {
+      let totalSynced = 0;
+      
+      for (const guild of this.client.guilds.cache.values()) {
+        const presences = guild.presences.cache;
+        
+        for (const presence of presences.values()) {
+          if (presence.user && !presence.user.bot) {
+            await this.presenceEventHandler.handlePresenceUpdate(null, presence);
+            totalSynced++;
+          }
+        }
+      }
+
+      logger.debug('Guild presences synchronized', {
+        component: 'DiscordBotService',
+        operation: 'presence_sync',
+        metadata: {
+          totalSynced,
+          guilds: this.client.guilds.cache.size
+        }
+      });
+
+    } catch (error) {
+      logger.error('Error synchronizing guild presences', {
+        component: 'DiscordBotService',
+        operation: 'presence_sync'
+      }, error as Error);
+    }
   }
 }

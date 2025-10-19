@@ -1,6 +1,8 @@
 # Plano de Implementação - Correção de Captura de Atividades
 
-- [-] 1. Configurar intents corretos no DiscordBotService
+- [x] 1. Configurar intents corretos no DiscordBotService
+
+
 
 
 
@@ -9,14 +11,23 @@
   - Adicionar logs informativos sobre status dos intents
   - _Requisitos: 1.1, 3.1, 3.3_
 
-- [ ] 2. Implementar event handler para eventos de presença
-  - [ ] 2.1 Criar PresenceEventHandler class
+- [x] 2. Implementar event handler para eventos de presença
+
+
+
+
+
+  - [x] 2.1 Criar PresenceEventHandler class
+
+
     - Implementar interface para processar eventos presenceUpdate
     - Adicionar métodos para transformar dados de presença do Discord
     - Implementar debouncing para evitar atualizações excessivas
     - _Requisitos: 1.2, 4.2, 4.4_
 
-  - [ ] 2.2 Integrar event listeners no DiscordBotService
+  - [x] 2.2 Integrar event listeners no DiscordBotService
+
+
     - Adicionar listener para evento presenceUpdate
     - Conectar event handler ao sistema de cache
     - Implementar tratamento de erros para eventos perdidos
