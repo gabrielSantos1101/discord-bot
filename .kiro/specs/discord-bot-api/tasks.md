@@ -75,15 +75,23 @@
   - Adicionar validação de permissões para configuração
   - _Requisitos: 5.1, 5.2, 5.4_
 
-- [ ] 6. Implementar sistema de canais automáticos
-- [ ] 6.1 Criar AutoChannelManager
+- [x] 6. Implementar sistema de canais automáticos
+
+
+
+
+- [x] 6.1 Criar AutoChannelManager
+
+
 
   - Implementar lógica de detecção de entrada em canal template
   - Criar função para gerar nomes de canais numerados sequencialmente
   - Adicionar verificação de limite máximo de canais (10 por template)
   - _Requisitos: 3.1, 3.3, 3.4_
 
-- [ ] 6.2 Implementar criação e limpeza de canais
+- [x] 6.2 Implementar criação e limpeza de canais
+
+
 
   - Criar função para criar novos canais com permissões corretas
   - Implementar timer para deletar canais vazios após 5 minutos

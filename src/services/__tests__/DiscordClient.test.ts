@@ -1,7 +1,6 @@
 import { env } from 'process';
 import { DiscordClient } from '../DiscordClient';
 
-// Mock fetch globally
 global.fetch = jest.fn();
 
 describe('DiscordClient', () => {
