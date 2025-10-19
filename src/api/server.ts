@@ -284,6 +284,20 @@ export class ApiServer {
   }
 
   /**
+   * Set database service for use in routes
+   */
+  public setDatabaseService(databaseService: any): void {
+    this.app.locals['databaseService'] = databaseService;
+  }
+
+  /**
+   * Set bot service for use in routes
+   */
+  public setBotService(botService: any): void {
+    this.app.locals['botService'] = botService;
+  }
+
+  /**
    * Get Express app instance (for testing)
    */
   public getApp(): Application {

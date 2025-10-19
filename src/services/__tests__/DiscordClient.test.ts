@@ -5,7 +5,7 @@ global.fetch = jest.fn();
 
 describe('DiscordClient', () => {
   let client: DiscordClient;
-  const mockBotToken = env.DISCORD_BOT_TOKEN || '';
+  const mockBotToken = env['DISCORD_BOT_TOKEN'] || '';
 
   beforeEach(() => {
     client = new DiscordClient(mockBotToken);

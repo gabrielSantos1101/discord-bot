@@ -57,18 +57,67 @@ export class ConfigRoutes {
         return;
       }
 
-      // TODO: Implement actual configuration storage (database integration in future task)
-      // For now, we'll simulate the configuration update
-      const mockConfig = {
-        commandPrefix: configData.commandPrefix || '!',
-        autoChannelCount: configData.autoChannels?.length || 0,
-        apiEnabled: configData.apiAccess?.enabled !== false
-      };
+      // Get database service from app locals (will be set by main server)
+      const databaseService = req.app.locals['databaseService'];
+      if (!databaseService) {
+        res.status(500).json({
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Database service not available',
+            timestamp: new Date().toISOString(),
+            requestId: requestId
+          }
+        });
+        return;
+      }
+
+      // Get existing configuration or create default
+      let serverConfig = await databaseService.getServerConfig(serverId);
+      if (!serverConfig) {
+        serverConfig = await databaseService.createDefaultServerConfig(serverId);
+      }
+
+      // Update configuration with provided data
+      if (configData.commandPrefix !== undefined) {
+        serverConfig.commandPrefix = configData.commandPrefix;
+      }
+      if (configData.enabled !== undefined) {
+        serverConfig.enabled = configData.enabled;
+      }
+      if (configData.timezone !== undefined) {
+        serverConfig.timezone = configData.timezone;
+      }
+      if (configData.adminRoles !== undefined) {
+        serverConfig.adminRoles = configData.adminRoles;
+      }
+      if (configData.apiAccess !== undefined) {
+        serverConfig.apiAccess = { ...serverConfig.apiAccess, ...configData.apiAccess };
+      }
+      if (configData.logging !== undefined) {
+        serverConfig.logging = { ...serverConfig.logging, ...configData.logging };
+      }
+      if (configData.autoChannels !== undefined) {
+        serverConfig.autoChannels = configData.autoChannels;
+      }
+
+      // Save updated configuration
+      serverConfig.lastUpdated = new Date();
+      await databaseService.saveServerConfig(serverConfig);
+
+      // Notify bot service to reload configuration
+      const botService = req.app.locals['botService'];
+      if (botService) {
+        await botService.reloadServerConfiguration(serverId);
+      }
 
       const response: ServerConfigResponse = {
         serverId,
         updated: true,
-        config: mockConfig
+        config: {
+          commandPrefix: serverConfig.commandPrefix,
+          autoChannelCount: serverConfig.autoChannels.length,
+          apiEnabled: serverConfig.apiAccess.enabled
+        }
       };
 
       res.json(this.createSuccessResponse(response, requestId));
@@ -96,29 +145,72 @@ export class ConfigRoutes {
         return;
       }
 
-      // TODO: Implement actual channel status retrieval (database/Discord API integration in future task)
-      // For now, we'll return mock data
-      const mockChannelStatus: AutoChannelStatusResponse = {
+      // Get bot service to access auto channel manager
+      const botService = req.app.locals['botService'];
+      if (!botService) {
+        res.status(503).json(this.createErrorResponse(
+          'SERVICE_UNAVAILABLE',
+          'Bot service not available',
+          requestId
+        ));
+        return;
+      }
+
+      const autoChannelManager = botService.getAutoChannelManager();
+      if (!autoChannelManager) {
+        res.status(503).json(this.createErrorResponse(
+          'SERVICE_UNAVAILABLE',
+          'Auto channel manager not available',
+          requestId
+        ));
+        return;
+      }
+
+      // Get database service to find channel configuration
+      const databaseService = req.app.locals['databaseService'];
+      if (!databaseService) {
+        res.status(503).json(this.createErrorResponse(
+          'SERVICE_UNAVAILABLE',
+          'Database service not available',
+          requestId
+        ));
+        return;
+      }
+
+      // Find which server this template belongs to
+      const serverIds = await databaseService.getAllServerIds();
+      let channelConfig = null;
+
+      for (const sid of serverIds) {
+        const configs = await databaseService.getChannelConfigs(sid);
+        const config = configs.find((c: any) => c.templateChannelId === templateId);
+        if (config) {
+          channelConfig = config;
+          break;
+        }
+      }
+
+      if (!channelConfig) {
+        res.status(404).json(this.createErrorResponse(
+          'TEMPLATE_NOT_FOUND',
+          'No auto-channel configuration found for this template ID',
+          requestId
+        ));
+        return;
+      }
+
+      // Get current stats from auto channel manager
+      const stats = autoChannelManager.getStats();
+      const activeChannelsForTemplate = stats.channelsByTemplate[templateId] || 0;
+
+      const channelStatus: AutoChannelStatusResponse = {
         templateId,
-        activeChannels: [
-          {
-            id: '1234567890123456789',
-            name: 'Auto Channel 1',
-            userCount: 3,
-            createdAt: new Date(Date.now() - 300000).toISOString() // 5 minutes ago
-          },
-          {
-            id: '1234567890123456790',
-            name: 'Auto Channel 2',
-            userCount: 1,
-            createdAt: new Date(Date.now() - 120000).toISOString() // 2 minutes ago
-          }
-        ],
-        maxChannels: 10,
-        canCreateNew: true
+        activeChannels: [], // TODO: Get actual active channel details in future enhancement
+        maxChannels: channelConfig.maxChannels,
+        canCreateNew: activeChannelsForTemplate < channelConfig.maxChannels
       };
 
-      res.json(this.createSuccessResponse(mockChannelStatus, requestId));
+      res.json(this.createSuccessResponse(channelStatus, requestId));
     } catch (error) {
       this.handleError(error, req, res);
     }

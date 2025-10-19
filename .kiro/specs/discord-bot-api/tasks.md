@@ -99,7 +99,12 @@
   - Integrar com cache para rastrear canais ativos
   - _Requisitos: 3.1, 3.2, 3.5_
 
-- [ ] 7. Adicionar sistema de configuração por servidor
+- [x] 7. Adicionar sistema de configuração por servidor
+
+
+
+
+
 
   - Implementar carregamento de configurações do database
   - Criar comandos do bot para configurar templates de canal

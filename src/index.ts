@@ -8,6 +8,8 @@ dotenv.config();
 
 // Main application entry point
 async function main() {
+  let databaseService: any = null;
+  let botService: any = null;
   console.log('Discord Bot API starting...');
   
   // Load configuration
@@ -52,29 +54,97 @@ async function main() {
     console.error('✗ Failed to initialize Discord Client:', error.message);
   }
   
-  // Initialize REST API Service (Task 5.1 - Complete)
+  // Initialize REST API Service (Task 5.1 - Complete, Task 7 - Enhanced)
+  let apiServer: any = null;
   try {
     console.log('Initializing REST API Service...');
     const { ApiServer } = await import('./api');
-    const apiServer = new ApiServer(config);
+    apiServer = new ApiServer(config);
+    
+    // Set services for use in routes
+    if (databaseService) {
+      apiServer.setDatabaseService(databaseService);
+    }
+    if (botService) {
+      apiServer.setBotService(botService);
+    }
+    
     await apiServer.start();
     console.log(`✓ REST API Service started on port ${config.api.port}`);
   } catch (error: any) {
     console.error('✗ Failed to initialize REST API Service:', error.message);
   }
   
-  // TODO: Initialize remaining services in next tasks
-  // - Database Service
-  // - Discord Bot Service (Task 6)
+  // Initialize Database Service (Task 7 - Complete)
+  try {
+    console.log('Initializing Database Service...');
+    const { DatabaseService } = await import('./services/DatabaseService');
+    databaseService = new DatabaseService();
+    await databaseService.initialize();
+    console.log('✓ Database Service initialized successfully');
+  } catch (error: any) {
+    console.error('✗ Failed to initialize Database Service:', error.message);
+  }
+
+  // Initialize Discord Bot Service (Task 6 - Complete, Task 7 - Enhanced)
+  try {
+    console.log('Initializing Discord Bot Service...');
+    const { DiscordBotService } = await import('./bot/services/DiscordBotService');
+    const cacheService = await CacheServiceFactory.create(config.cache);
+    
+    if (databaseService) {
+      botService = new DiscordBotService(databaseService, cacheService);
+      await botService.start();
+      console.log('✓ Discord Bot Service started successfully');
+      
+      const status = botService.getStatus();
+      console.log(`  → Connected to ${status.guilds} guilds`);
+      console.log(`  → Cached ${status.users} users`);
+    } else {
+      console.log('⚠ Skipping Discord Bot Service - Database Service not available');
+    }
+  } catch (error: any) {
+    console.error('✗ Failed to initialize Discord Bot Service:', error.message);
+  }
   
   console.log('Application initialized successfully');
+
+  // Setup signal handlers with service references
+  const services = { botService, databaseService };
+  
+  // Handle process signals
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM', services));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT', services));
+
+  // Handle uncaught exceptions
+  process.on('uncaughtException', async (error) => {
+    console.error('Uncaught Exception:', error);
+    await gracefulShutdown('uncaughtException', services);
+  });
+
+  process.on('unhandledRejection', async (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    await gracefulShutdown('unhandledRejection', services);
+  });
 }
 
 // Graceful shutdown handler
-async function gracefulShutdown(signal: string) {
+async function gracefulShutdown(signal: string, services: { botService?: any, databaseService?: any } = {}) {
   console.log(`\nReceived ${signal}, shutting down gracefully...`);
   
   try {
+    // Stop bot service
+    if (services.botService) {
+      await services.botService.stop();
+      console.log('✓ Bot service stopped');
+    }
+    
+    // Close database service
+    if (services.databaseService) {
+      await services.databaseService.close();
+      console.log('✓ Database service closed');
+    }
+    
     // Close cache service
     await CacheServiceFactory.close();
     console.log('✓ Cache service closed');
@@ -87,20 +157,7 @@ async function gracefulShutdown(signal: string) {
   }
 }
 
-// Handle process signals
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle uncaught exceptions
-process.on('uncaughtException', async (error) => {
-  console.error('Uncaught Exception:', error);
-  await gracefulShutdown('uncaughtException');
-});
-
-process.on('unhandledRejection', async (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  await gracefulShutdown('unhandledRejection');
-});
 
 // Start the application
 main().catch((error) => {
