@@ -138,7 +138,8 @@ export class ServiceOrchestrator {
         operation: 'database_start'
       });
 
-      this.databaseService = new DatabaseService();
+      const dbPath = process.env['DATABASE_PATH'] || './data/bot-config.db';
+      this.databaseService = new DatabaseService(dbPath);
       await this.databaseService.initialize();
       
       this.services.set('database', this.databaseService);
