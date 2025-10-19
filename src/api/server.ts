@@ -7,9 +7,9 @@ import { ErrorCode } from '../models/ErrorTypes';
 import { ServiceOrchestrator } from '../services/ServiceOrchestrator';
 import { AppConfig } from '../utils/config';
 import {
-    createErrorResponse as createStandardErrorResponse,
-    extractErrorInfo,
-    generateRequestId
+  createErrorResponse as createStandardErrorResponse,
+  extractErrorInfo,
+  generateRequestId
 } from '../utils/errorHandler';
 import { LogContext, logger } from '../utils/logger';
 
@@ -204,12 +204,16 @@ export class ApiServer {
         endpoints: {
           users: '/api/users/{userId}/{endpoint}',
           config: '/api/config/server/{serverId}',
-          channels: '/api/channels/auto/{templateId}'
+          channels: '/api/channels/auto/{templateId}',
+          diagnostics: '/api/diagnostics',
+          metrics: '/api/metrics'
         },
         documentation: {
           health: '/health',
           detailedHealth: '/health/detailed',
-          metrics: '/metrics'
+          systemMetrics: '/metrics',
+          metricsHealth: '/api/metrics/health',
+          metricsDashboard: '/api/metrics'
         }
       });
     });
@@ -244,9 +248,6 @@ export class ApiServer {
         res.status(500).json({ error: 'Failed to generate metrics' });
       }
     });
-
-    // User routes will be set up after services are available
-    // this.app.use('/api/users', userRoutes);
 
     const { configRoutes } = require('./routes/configRoutes');
     this.app.use('/api/config', configRoutes);
@@ -449,18 +450,26 @@ export class ApiServer {
   public setBotService(botService: any): void {
     this.app.locals['botService'] = botService;
     
-    // Set up diagnostic routes now that bot service is available
     const { createDiagnosticRoutes } = require('./routes/diagnosticRoutes');
     const diagnosticRoutes = createDiagnosticRoutes(botService);
     this.app.use('/api/diagnostics', diagnosticRoutes);
+
+    const metricsService = botService.getMetricsService?.();
+    if (metricsService) {
+      const { createMetricsRoutes } = require('./routes/metricsRoutes');
+      const metricsRoutes = createMetricsRoutes(metricsService);
+      this.app.use('/api/metrics', metricsRoutes);
+    }
   }
 
   public setCacheService(cacheService: any): void {
     this.app.locals['cacheService'] = cacheService;
     
-    // Set up user routes now that cache service is available
+    const botService = this.app.locals['botService'];
+    const metricsService = botService?.getMetricsService?.();
+    
     const { createUserRoutes } = require('./routes/userRoutes');
-    const userRoutes = createUserRoutes(cacheService);
+    const userRoutes = createUserRoutes(cacheService, metricsService);
     this.app.use('/api/users', userRoutes);
   }
 

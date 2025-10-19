@@ -12,9 +12,13 @@ import { DiscordClientFactory } from '../../services/DiscordClientFactory';
 export class UserRoutes {
   private router: Router;
   private discordClient: DiscordClient;
+  private cacheService: CacheService;
+  private metricsService?: any;
 
-  constructor(cacheService: CacheService) {
+  constructor(cacheService: CacheService, metricsService?: any) {
     this.router = Router();
+    this.cacheService = cacheService;
+    this.metricsService = metricsService;
     this.discordClient = DiscordClientFactory.getInstance(cacheService);
     this.setupRoutes();
   }
@@ -23,13 +27,8 @@ export class UserRoutes {
    * Setup user routes
    */
   private setupRoutes(): void {
-    // GET /api/users/{userId}/status - Get user status
     this.router.get('/:userId/status', this.getUserStatus.bind(this));
-    
-    // GET /api/users/{userId}/activity - Get user activities
     this.router.get('/:userId/activity', this.getUserActivity.bind(this));
-    
-    // GET /api/users/{userId}/presence - Get user Rich Presence
     this.router.get('/:userId/presence', this.getUserPresence.bind(this));
   }
 
@@ -38,12 +37,15 @@ export class UserRoutes {
    * GET /api/users/{userId}/status
    */
   private async getUserStatus(req: Request, res: Response): Promise<void> {
+    const startTime = Date.now();
+    let success = false;
+    let fromCache = false;
+
     try {
       const { userId } = req.params;
       const { guildId } = req.query;
       const requestId = req.headers['x-request-id'] as string;
 
-      // Validate user ID exists and is valid
       if (!userId || !this.isValidUserId(userId)) {
         res.status(400).json(this.createErrorResponse(
           'INVALID_USER_ID',
@@ -53,13 +55,25 @@ export class UserRoutes {
         return;
       }
 
-      // Query Discord API directly
-      const userData = await this.discordClient.getUserData(
-        userId, 
-        guildId as string | undefined
-      );
+      let userData;
+      let fromCache = false;
+      const cachedPresence = await this.cacheService.getUserPresenceDataWithFallback(userId);
 
-      // Validate response data
+      if (cachedPresence && this.isCacheValid(cachedPresence)) {
+        userData = {
+          id: userId,
+          status: cachedPresence.status,
+          activities: cachedPresence.activities,
+          lastSeen: cachedPresence.lastUpdated
+        };
+        fromCache = true;
+      } else {
+        userData = await this.discordClient.getUserData(
+          userId, 
+          guildId as string | undefined
+        );
+      }
+
       const validationErrors = validateUserData(userData);
       if (validationErrors.length > 0) {
         res.status(500).json(this.createErrorResponse(
@@ -76,12 +90,19 @@ export class UserRoutes {
         status: userData.status,
         activities: userData.activities,
         lastUpdated: userData.lastSeen.toISOString(),
-        inVoiceChannel: false // TODO: Implement voice channel detection in future task
+        inVoiceChannel: false,
+        fromCache
       };
 
+      success = true;
       res.json(this.createSuccessResponse(response, requestId));
     } catch (error) {
       this.handleError(error, req, res);
+    } finally {
+      if (this.metricsService) {
+        const responseTime = Date.now() - startTime;
+        this.metricsService.recordApiRequest(responseTime, success, fromCache);
+      }
     }
   }
 
@@ -90,12 +111,15 @@ export class UserRoutes {
    * GET /api/users/{userId}/activity
    */
   private async getUserActivity(req: Request, res: Response): Promise<void> {
+    const startTime = Date.now();
+    let success = false;
+    let fromCache = false;
+
     try {
       const { userId } = req.params;
       const { guildId } = req.query;
       const requestId = req.headers['x-request-id'] as string;
 
-      // Validate user ID exists and is valid
       if (!userId || !this.isValidUserId(userId)) {
         res.status(400).json(this.createErrorResponse(
           'INVALID_USER_ID',
@@ -105,21 +129,39 @@ export class UserRoutes {
         return;
       }
 
-      // Query Discord API directly
-      const activities = await this.discordClient.getUserActivities(
-        userId,
-        guildId as string | undefined
-      );
+      let activities;
+      let lastUpdated;
+      let fromCache = false;
+
+      const cachedPresence = await this.cacheService.getUserPresenceDataWithFallback(userId);
+      if (cachedPresence && this.isCacheValid(cachedPresence)) {
+        activities = cachedPresence.activities;
+        lastUpdated = cachedPresence.lastUpdated.toISOString();
+        fromCache = true;
+      } else {
+        activities = await this.discordClient.getUserActivities(
+          userId,
+          guildId as string | undefined
+        );
+        lastUpdated = new Date().toISOString();
+      }
 
       const response: UserActivityResponse = {
         userId,
         activities,
-        lastUpdated: new Date().toISOString()
+        lastUpdated,
+        fromCache
       };
 
+      success = true;
       res.json(this.createSuccessResponse(response, requestId));
     } catch (error) {
       this.handleError(error, req, res);
+    } finally {
+      if (this.metricsService) {
+        const responseTime = Date.now() - startTime;
+        this.metricsService.recordApiRequest(responseTime, success, fromCache);
+      }
     }
   }
 
@@ -128,12 +170,15 @@ export class UserRoutes {
    * GET /api/users/{userId}/presence
    */
   private async getUserPresence(req: Request, res: Response): Promise<void> {
+    const startTime = Date.now();
+    let success = false;
+    let fromCache = false;
+
     try {
       const { userId } = req.params;
       const { guildId } = req.query;
       const requestId = req.headers['x-request-id'] as string;
 
-      // Validate user ID exists and is valid
       if (!userId || !this.isValidUserId(userId)) {
         res.status(400).json(this.createErrorResponse(
           'INVALID_USER_ID',
@@ -143,18 +188,30 @@ export class UserRoutes {
         return;
       }
 
-      // Query Discord API directly
-      const userData = await this.discordClient.getUserData(
-        userId,
-        guildId as string | undefined
-      );
+      let userData;
+      let fromCache = false;
+
+      const cachedPresence = await this.cacheService.getUserPresenceDataWithFallback(userId);
+      if (cachedPresence && this.isCacheValid(cachedPresence)) {
+        userData = {
+          id: userId,
+          status: cachedPresence.status,
+          activities: cachedPresence.activities,
+          lastSeen: cachedPresence.lastUpdated
+        };
+        fromCache = true;
+      } else {
+        userData = await this.discordClient.getUserData(
+          userId,
+          guildId as string | undefined
+        );
+      }
 
       const richPresence = await this.discordClient.getUserRichPresence(
         userId,
         guildId as string | undefined
       );
 
-      // Get current activity (first non-custom activity or first activity)
       const currentActivity = userData.activities.find(activity => 
         activity.type !== 'custom'
       ) || userData.activities[0] || null;
@@ -163,12 +220,19 @@ export class UserRoutes {
         userId,
         currentActivity,
         richPresence,
-        lastUpdated: userData.lastSeen.toISOString()
+        lastUpdated: userData.lastSeen.toISOString(),
+        fromCache
       };
 
+      success = true;
       res.json(this.createSuccessResponse(response, requestId));
     } catch (error) {
       this.handleError(error, req, res);
+    } finally {
+      if (this.metricsService) {
+        const responseTime = Date.now() - startTime;
+        this.metricsService.recordApiRequest(responseTime, success, fromCache);
+      }
     }
   }
 
@@ -176,10 +240,17 @@ export class UserRoutes {
    * Validate Discord user ID (snowflake format)
    */
   private isValidUserId(userId: string): boolean {
-    // Discord snowflakes are 64-bit integers represented as strings
-    // They should be 17-19 digits long and numeric
     const snowflakeRegex = /^\d{17,19}$/;
     return snowflakeRegex.test(userId);
+  }
+
+  /**
+   * Check if cached presence data is still valid
+   */
+  private isCacheValid(presence: any): boolean {
+    const maxAge = 5 * 60 * 1000;
+    const age = Date.now() - presence.lastUpdated.getTime();
+    return age < maxAge;
   }
 
   /**
@@ -187,8 +258,7 @@ export class UserRoutes {
    */
   private handleError(error: any, req: Request, res: Response): void {
     const requestId = req.headers['x-request-id'] as string;
-    
-    // Handle known error types
+
     if (error.code === ErrorCode.USER_NOT_FOUND) {
       res.status(404).json(this.createErrorResponse(
         'USER_NOT_FOUND',
@@ -228,7 +298,6 @@ export class UserRoutes {
       return;
     }
 
-    // Handle unknown errors
     console.error('Unhandled error in user routes:', error);
     res.status(500).json(this.createErrorResponse(
       'INTERNAL_ERROR',
@@ -277,10 +346,8 @@ export class UserRoutes {
   }
 }
 
-// Factory function to create router with dependencies
-export function createUserRoutes(cacheService: CacheService): Router {
-  return new UserRoutes(cacheService).getRouter();
+export function createUserRoutes(cacheService: CacheService, metricsService?: any): Router {
+  return new UserRoutes(cacheService, metricsService).getRouter();
 }
 
-// Legacy export for backward compatibility - will be updated by server
 export let userRoutes: Router;

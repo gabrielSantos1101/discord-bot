@@ -2,6 +2,7 @@ import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { CacheService } from '../../services/CacheService';
 import { DatabaseService } from '../../services/DatabaseService';
 import { DiagnosticService } from '../../services/DiagnosticService';
+import { MetricsService } from '../../services/MetricsService';
 import { PresenceError, presenceErrorHandler, PresenceErrorType } from '../../services/PresenceErrorHandler';
 import { PresenceSyncService } from '../../services/PresenceSyncService';
 import { getDiscordConfig } from '../../utils/config';
@@ -20,6 +21,7 @@ export class DiscordBotService {
   private presenceEventHandler: PresenceEventHandler | null = null;
   private presenceSyncService: PresenceSyncService | null = null;
   private diagnosticService: DiagnosticService | null = null;
+  private metricsService: MetricsService | null = null;
   private databaseService: DatabaseService;
   private cacheService: CacheService;
   private isReady = false;
@@ -165,11 +167,19 @@ export class DiscordBotService {
         this.presenceEventHandler
       );
       this.diagnosticService = new DiagnosticService(this.client, this.cacheService);
+      this.metricsService = new MetricsService({
+        errorRateThreshold: 5,
+        responseTimeThreshold: 2000,
+        cacheHitRateThreshold: 80,
+        memoryUsageThreshold: 85,
+        enabled: true
+      });
 
       await this.loadAllServerConfigurations();
       this.presenceSyncService.start();
 
-      // Run initial diagnostics
+      this.setupMetricsMonitoring();
+
       setTimeout(async () => {
         try {
           await this.diagnosticService!.runDiagnosticsWithAlerts();
@@ -179,7 +189,7 @@ export class DiscordBotService {
             operation: 'initial_diagnostics'
           }, error as Error);
         }
-      }, 10000); // Wait 10 seconds after startup
+      }, 10000);
 
       this.isReady = true;
       logger.info('Discord bot service fully initialized', {
@@ -239,6 +249,9 @@ export class DiscordBotService {
    * Handle presence update events
    */
   private async onPresenceUpdate(oldPresence: any, newPresence: any): Promise<void> {
+    const startTime = Date.now();
+    let success = false;
+
     try {
       if (!this.presenceEventHandler) {
         const error = new PresenceError(
@@ -261,6 +274,7 @@ export class DiscordBotService {
       }
 
       await this.presenceEventHandler.handlePresenceUpdate(oldPresence, newPresence);
+      success = true;
       
     } catch (error) {
       presenceErrorHandler.handleError(error as Error, {
@@ -269,6 +283,16 @@ export class DiscordBotService {
         userId: newPresence?.userId,
         guildId: newPresence?.guild?.id
       });
+    } finally {
+      if (this.metricsService) {
+        const processingTime = Date.now() - startTime;
+        this.metricsService.recordPresenceEvent(processingTime, success);
+        
+        if (this.presenceEventHandler) {
+          const queueSize = (this.presenceEventHandler as any).presenceUpdateQueue?.size || 0;
+          this.metricsService.updatePresenceQueueSize(queueSize);
+        }
+      }
     }
   }
 
@@ -373,6 +397,10 @@ export class DiscordBotService {
         this.presenceEventHandler.clearCache();
       }
 
+      if (this.metricsService) {
+        this.metricsService.destroy();
+      }
+
       if (this.client) {
         await this.client.destroy();
       }
@@ -453,5 +481,60 @@ export class DiscordBotService {
       throw new Error('Diagnostic service not initialized');
     }
     return await this.diagnosticService.runDiagnosticsWithAlerts();
+  }
+
+  /**
+   * Get metrics service (for external access)
+   */
+  public getMetricsService(): MetricsService | null {
+    return this.metricsService;
+  }
+
+  /**
+   * Setup metrics monitoring and alerts
+   */
+  private setupMetricsMonitoring(): void {
+    if (!this.metricsService) {
+      return;
+    }
+
+    this.metricsService.on('alert', (alert: any) => {
+      const logLevel = alert.severity === 'critical' ? 'error' : 'warn';
+      logger[logLevel]('Metrics alert triggered', {
+        component: 'DiscordBotService',
+        operation: 'metrics_alert',
+        metadata: {
+          type: alert.type,
+          severity: alert.severity,
+          message: alert.message,
+          value: alert.value,
+          threshold: alert.threshold,
+          timestamp: alert.timestamp
+        }
+      });
+    });
+
+    setInterval(() => {
+      if (this.metricsService) {
+        const status = this.getStatus();
+        this.metricsService.updateSystemMetrics({
+          discordConnected: this.isReady,
+          cacheConnected: this.cacheService.isAvailable(),
+          databaseConnected: true,
+          guildsCount: status.guilds,
+          usersCount: status.users
+        });
+
+        if (this.presenceEventHandler) {
+          const memoryCacheStats = this.presenceEventHandler.getMemoryCacheStats();
+          this.metricsService.updateActiveUsers(memoryCacheStats.size);
+        }
+      }
+    }, 30000);
+
+    logger.info('Metrics monitoring setup completed', {
+      component: 'DiscordBotService',
+      operation: 'metrics_setup'
+    });
   }
 }
