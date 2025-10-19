@@ -7,9 +7,9 @@ import { ErrorCode } from '../models/ErrorTypes';
 import { ServiceOrchestrator } from '../services/ServiceOrchestrator';
 import { AppConfig } from '../utils/config';
 import {
-  createErrorResponse as createStandardErrorResponse,
-  extractErrorInfo,
-  generateRequestId
+    createErrorResponse as createStandardErrorResponse,
+    extractErrorInfo,
+    generateRequestId
 } from '../utils/errorHandler';
 import { LogContext, logger } from '../utils/logger';
 
@@ -245,8 +245,8 @@ export class ApiServer {
       }
     });
 
-    const { userRoutes } = require('./routes/userRoutes');
-    this.app.use('/api/users', userRoutes);
+    // User routes will be set up after services are available
+    // this.app.use('/api/users', userRoutes);
 
     const { configRoutes } = require('./routes/configRoutes');
     this.app.use('/api/config', configRoutes);
@@ -448,6 +448,15 @@ export class ApiServer {
 
   public setBotService(botService: any): void {
     this.app.locals['botService'] = botService;
+  }
+
+  public setCacheService(cacheService: any): void {
+    this.app.locals['cacheService'] = cacheService;
+    
+    // Set up user routes now that cache service is available
+    const { createUserRoutes } = require('./routes/userRoutes');
+    const userRoutes = createUserRoutes(cacheService);
+    this.app.use('/api/users', userRoutes);
   }
 
   public setOrchestrator(orchestrator: ServiceOrchestrator): void {

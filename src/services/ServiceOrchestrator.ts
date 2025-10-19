@@ -167,10 +167,14 @@ export class ServiceOrchestrator {
         operation: 'discord_client_start'
       });
 
-      DiscordClientFactory.getInstance();
+      if (!this.cacheService) {
+        throw new Error('Cache Service is required for Discord Client');
+      }
+
+      DiscordClientFactory.getInstance(this.cacheService);
 
       if (this.config.discord.botToken) {
-        const connectionTest = await DiscordClientFactory.testConnection();
+        const connectionTest = await DiscordClientFactory.testConnection(this.cacheService);
         
         if (connectionTest) {
           this.updateServiceHealth('discord-client', 'healthy', {
@@ -205,7 +209,7 @@ export class ServiceOrchestrator {
         });
       }
 
-      this.services.set('discord-client', DiscordClientFactory.getInstance());
+      this.services.set('discord-client', DiscordClientFactory.getInstance(this.cacheService));
     } catch (error) {
       this.updateServiceHealth('discord-client', 'error', { error: (error as Error).message });
       logger.error('Failed to start Discord Client', {
@@ -229,6 +233,10 @@ export class ServiceOrchestrator {
 
       if (this.databaseService) {
         this.apiServer.setDatabaseService(this.databaseService);
+      }
+
+      if (this.cacheService) {
+        this.apiServer.setCacheService(this.cacheService);
       }
       
       await this.apiServer.start();
@@ -379,10 +387,12 @@ export class ServiceOrchestrator {
     }
 
     try {
-      const discordClient = DiscordClientFactory.getInstance();
-      if (discordClient && typeof discordClient.healthCheck === 'function') {
-        const health = await discordClient.healthCheck();
-        this.updateServiceHealth('discord-client', health.healthy ? 'healthy' : 'unhealthy', health);
+      if (this.cacheService) {
+        const discordClient = DiscordClientFactory.getInstance(this.cacheService);
+        if (discordClient && typeof discordClient.healthCheck === 'function') {
+          const health = await discordClient.healthCheck();
+          this.updateServiceHealth('discord-client', health.healthy ? 'healthy' : 'unhealthy', health);
+        }
       }
     } catch (error) {
       this.updateServiceHealth('discord-client', 'error', { error: (error as Error).message });

@@ -10,7 +10,7 @@ export class DiscordClientFactory {
   /**
    * Create a new Discord client instance
    */
-  static create(): DiscordClient {
+  static create(cacheService: CacheService): DiscordClient {
     const config = getDiscordConfig();
     
     if (!config.botToken) {
@@ -21,15 +21,15 @@ export class DiscordClientFactory {
       throw new Error('Invalid Discord bot token format. Please check your DISCORD_BOT_TOKEN environment variable.');
     }
 
-    return new DiscordClient(config.botToken);
+    return new DiscordClient(config.botToken, cacheService);
   }
 
   /**
    * Get singleton instance of Discord client
    */
-  static getInstance(): DiscordClient {
+  static getInstance(cacheService: CacheService): DiscordClient {
     if (!this.instance) {
-      this.instance = this.create();
+      this.instance = this.create(cacheService);
     }
     return this.instance;
   }
@@ -44,9 +44,9 @@ export class DiscordClientFactory {
   /**
    * Test Discord client connection
    */
-  static async testConnection(): Promise<boolean> {
+  static async testConnection(cacheService: CacheService): Promise<boolean> {
     try {
-      const client = this.create();
+      const client = this.create(cacheService);
       // Try to get the bot's own user data to test the connection
       const botUser = await client.getUserData('@me');
       return botUser.bot === true;

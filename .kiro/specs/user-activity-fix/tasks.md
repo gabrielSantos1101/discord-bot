@@ -55,14 +55,22 @@
     - Implementar sincronização entre cache Redis e memória
     - _Requisitos: 4.3, 5.2_
 
-- [ ] 4. Atualizar DiscordClient para usar dados cached
-  - [ ] 4.1 Modificar getUserActivities para priorizar cache
+- [x] 4. Atualizar DiscordClient para usar dados cached
+
+
+
+
+  - [x] 4.1 Modificar getUserActivities para priorizar cache
+
+
     - Implementar lógica de fallback: cache -> API REST
     - Adicionar validação de idade dos dados cached
     - Otimizar consultas para reduzir chamadas à API do Discord
     - _Requisitos: 2.1, 2.2, 5.3_
 
-  - [ ] 4.2 Implementar batch operations para múltiplos usuários
+  - [x] 4.2 Implementar batch operations para múltiplos usuários
+
+
     - Criar método para consultar atividades de vários usuários
     - Otimizar consultas ao cache para operações em lote
     - Adicionar rate limiting inteligente para API REST

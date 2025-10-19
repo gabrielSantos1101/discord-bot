@@ -1,8 +1,10 @@
 import { Activity } from '../models/Activity';
 import { DiscordApiError, ErrorCode } from '../models/ErrorTypes';
 import { RichPresence } from '../models/RichPresence';
+import { UserActivityData } from '../models/UserActivityData';
 import { UserData, UserStatus } from '../models/UserData';
 import { CircuitBreaker, DEFAULT_BACKOFF_CONFIGS, extractErrorInfo, handleDiscordRateLimit, LogContext, logger, retryWithBackoff, SanitizationUtils, ValidationUtils } from '../utils';
+import type { CacheService } from './CacheService';
 
 /**
  * Rate limiting configuration for Discord API
@@ -108,6 +110,7 @@ export class DiscordClient {
   private readonly botToken: string;
   private readonly rateLimitConfig: RateLimitConfig;
   private readonly circuitBreaker: CircuitBreaker;
+  private readonly cacheService: CacheService;
   private readonly requestMetrics = {
     totalRequests: 0,
     successfulRequests: 0,
@@ -115,12 +118,13 @@ export class DiscordClient {
     rateLimitHits: 0
   };
 
-  constructor(botToken: string) {
+  constructor(botToken: string, cacheService: CacheService) {
     if (!botToken) {
       throw new Error('Bot token is required');
     }
     
     this.botToken = botToken;
+    this.cacheService = cacheService;
     this.rateLimitConfig = {
       maxRequestsPerSecond: 50,
       currentRequests: 0,
@@ -247,11 +251,88 @@ export class DiscordClient {
   }
 
   /**
-   * Get user activities by user ID
+   * Get user activities by user ID with cache priority
+   * Implements fallback: cache -> API REST
    */
   async getUserActivities(userId: string, guildId?: string): Promise<Activity[]> {
-    const userData = await this.getUserData(userId, guildId);
-    return userData.activities;
+    const context: LogContext = {
+      component: 'DiscordClient',
+      operation: 'getUserActivities',
+      userId: SanitizationUtils.sanitizeUserId(userId),
+      ...(guildId && { guildId: SanitizationUtils.sanitizeUserId(guildId) })
+    };
+
+    // Validate input
+    const userIdValidation = ValidationUtils.validateUserId(userId, context);
+    if (!userIdValidation.isValid) {
+      const error = new Error('Invalid user ID format');
+      (error as any).code = ErrorCode.INVALID_REQUEST;
+      (error as any).details = userIdValidation.errors;
+      throw error;
+    }
+
+    const sanitizedUserId = userIdValidation.data!;
+
+    try {
+      // 1. Try to get from cache first
+      const cachedPresence = await this.cacheService.getUserPresenceDataWithFallback(sanitizedUserId);
+      if (cachedPresence && this.isCacheValid(cachedPresence)) {
+        logger.debug('Returning activities from cache', {
+          ...context,
+          metadata: {
+            cacheAge: Date.now() - cachedPresence.lastUpdated.getTime(),
+            activitiesCount: cachedPresence.activities.length
+          }
+        });
+        return cachedPresence.activities;
+      }
+
+      // 2. Fallback to API REST
+      logger.debug('Cache miss or expired, fetching from API', {
+        ...context,
+        metadata: {
+          hasCachedData: !!cachedPresence,
+          cacheExpired: cachedPresence ? !this.isCacheValid(cachedPresence) : false
+        }
+      });
+
+      const userData = await this.getUserData(sanitizedUserId, guildId);
+      
+      // 3. Update cache with fresh data
+      if (userData.activities.length > 0 || userData.status !== 'offline') {
+        const activityData: UserActivityData = {
+          userId: sanitizedUserId,
+          status: userData.status,
+          activities: userData.activities,
+          lastUpdated: new Date()
+          // clientStatus will be populated by presence events
+        };
+
+        await this.cacheService.setUserPresenceDataWithFallback(sanitizedUserId, activityData);
+        
+        logger.debug('Updated cache with fresh activity data', {
+          ...context,
+          metadata: {
+            activitiesCount: userData.activities.length,
+            status: userData.status
+          }
+        });
+      }
+
+      return userData.activities;
+    } catch (error) {
+      const errorInfo = extractErrorInfo(error);
+      
+      logger.error('Failed to get user activities', {
+        ...context,
+        metadata: {
+          errorCode: errorInfo.code,
+          isRetryable: errorInfo.isRetryable
+        }
+      }, error as Error);
+
+      throw error;
+    }
   }
 
   /**
@@ -260,6 +341,240 @@ export class DiscordClient {
   async getUserStatus(userId: string, guildId?: string): Promise<UserStatus> {
     const userData = await this.getUserData(userId, guildId);
     return userData.status;
+  }
+
+  /**
+   * Get activities for multiple users in batch with intelligent rate limiting
+   */
+  async getUserActivitiesBatch(userIds: string[], guildId?: string): Promise<Map<string, Activity[]>> {
+    const context: LogContext = {
+      component: 'DiscordClient',
+      operation: 'getUserActivitiesBatch',
+      metadata: {
+        userCount: userIds.length,
+        ...(guildId && { guildId: SanitizationUtils.sanitizeUserId(guildId) })
+      }
+    };
+
+    const result = new Map<string, Activity[]>();
+
+    if (userIds.length === 0) {
+      return result;
+    }
+
+    // Validate all user IDs first
+    const validUserIds: string[] = [];
+    for (const userId of userIds) {
+      const validation = ValidationUtils.validateUserId(userId, context);
+      if (validation.isValid && validation.data) {
+        validUserIds.push(validation.data);
+      } else {
+        logger.warn('Invalid user ID in batch request', {
+          ...context,
+          metadata: { ...context.metadata, invalidUserId: userId }
+        });
+      }
+    }
+
+    if (validUserIds.length === 0) {
+      logger.warn('No valid user IDs in batch request', context);
+      return result;
+    }
+
+    try {
+      logger.info('Starting batch activities fetch', {
+        ...context,
+        metadata: {
+          ...context.metadata,
+          validUserCount: validUserIds.length,
+          originalUserCount: userIds.length
+        }
+      });
+
+      // 1. Try to get as many as possible from cache
+      const cachedPresences = await this.cacheService.getUserPresencesBatchWithFallback(validUserIds);
+      const cacheHits: string[] = [];
+      const cacheMisses: string[] = [];
+
+      for (const userId of validUserIds) {
+        const cachedPresence = cachedPresences.get(userId);
+        if (cachedPresence && this.isCacheValid(cachedPresence)) {
+          result.set(userId, cachedPresence.activities);
+          cacheHits.push(userId);
+        } else {
+          cacheMisses.push(userId);
+        }
+      }
+
+      logger.debug('Cache results for batch request', {
+        ...context,
+        metadata: {
+          ...context.metadata,
+          cacheHits: cacheHits.length,
+          cacheMisses: cacheMisses.length,
+          cacheHitRate: Math.round((cacheHits.length / validUserIds.length) * 100)
+        }
+      });
+
+      // 2. Fetch missing data from API with intelligent rate limiting
+      if (cacheMisses.length > 0) {
+        const apiResults = await this.fetchUsersWithRateLimit(cacheMisses, guildId, context);
+        
+        // 3. Update cache with fresh data and add to results
+        const presencesToCache = new Map<string, UserActivityData>();
+        
+        for (const [userId, userData] of apiResults.entries()) {
+          result.set(userId, userData.activities);
+          
+          // Prepare for batch cache update
+          if (userData.activities.length > 0 || userData.status !== 'offline') {
+            const activityData: UserActivityData = {
+              userId,
+              status: userData.status,
+              activities: userData.activities,
+              lastUpdated: new Date()
+              // clientStatus will be populated by presence events
+            };
+            presencesToCache.set(userId, activityData);
+          }
+        }
+
+        // 4. Batch update cache
+        if (presencesToCache.size > 0) {
+          await this.cacheService.setMultipleUserPresencesWithFallback(presencesToCache);
+          
+          logger.debug('Updated cache with batch API results', {
+            ...context,
+            metadata: {
+              ...context.metadata,
+              cachedUsers: presencesToCache.size
+            }
+          });
+        }
+      }
+
+      logger.info('Batch activities fetch completed', {
+        ...context,
+        metadata: {
+          ...context.metadata,
+          totalResults: result.size,
+          fromCache: cacheHits.length,
+          fromApi: cacheMisses.length
+        }
+      });
+
+      return result;
+    } catch (error) {
+      const errorInfo = extractErrorInfo(error);
+      
+      logger.error('Failed to fetch user activities batch', {
+        ...context,
+        metadata: {
+          ...context.metadata,
+          errorCode: errorInfo.code,
+          isRetryable: errorInfo.isRetryable
+        }
+      }, error as Error);
+
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch multiple users from API with intelligent rate limiting
+   */
+  private async fetchUsersWithRateLimit(
+    userIds: string[], 
+    guildId: string | undefined, 
+    context: LogContext
+  ): Promise<Map<string, UserData>> {
+    const result = new Map<string, UserData>();
+    const batchSize = 10; // Process in smaller batches to respect rate limits
+    const delayBetweenBatches = 100; // 100ms delay between batches
+
+    logger.debug('Starting rate-limited API fetch', {
+      ...context,
+      operation: 'fetchUsersWithRateLimit',
+      metadata: {
+        totalUsers: userIds.length,
+        batchSize,
+        estimatedBatches: Math.ceil(userIds.length / batchSize)
+      }
+    });
+
+    for (let i = 0; i < userIds.length; i += batchSize) {
+      const batch = userIds.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(userIds.length / batchSize);
+
+      logger.debug(`Processing batch ${batchNumber}/${totalBatches}`, {
+        ...context,
+        operation: 'fetchUsersWithRateLimit',
+        metadata: {
+          batchNumber,
+          totalBatches,
+          batchSize: batch.length
+        }
+      });
+
+      // Process batch concurrently but with limited concurrency
+      const batchPromises = batch.map(async (userId) => {
+        try {
+          const userData = await this.getUserData(userId, guildId);
+          return { userId, userData };
+        } catch (error) {
+          const errorInfo = extractErrorInfo(error);
+          
+          logger.warn('Failed to fetch user data in batch', {
+            ...context,
+            operation: 'fetchUsersWithRateLimit',
+            userId: SanitizationUtils.sanitizeUserId(userId),
+            metadata: {
+              batchNumber,
+              errorCode: errorInfo.code,
+              error: (error as Error).message
+            }
+          });
+          
+          return { userId, userData: null };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      
+      // Add successful results to the map
+      for (const { userId, userData } of batchResults) {
+        if (userData) {
+          result.set(userId, userData);
+        }
+      }
+
+      // Add delay between batches (except for the last batch)
+      if (i + batchSize < userIds.length) {
+        await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
+      }
+    }
+
+    logger.debug('Rate-limited API fetch completed', {
+      ...context,
+      operation: 'fetchUsersWithRateLimit',
+      metadata: {
+        requestedUsers: userIds.length,
+        successfulUsers: result.size,
+        successRate: Math.round((result.size / userIds.length) * 100)
+      }
+    });
+
+    return result;
+  }
+
+  /**
+   * Check if cached presence data is still valid
+   */
+  private isCacheValid(presence: UserActivityData): boolean {
+    const maxAge = 5 * 60 * 1000; // 5 minutes as per requirements
+    const age = Date.now() - presence.lastUpdated.getTime();
+    return age < maxAge;
   }
 
   /**

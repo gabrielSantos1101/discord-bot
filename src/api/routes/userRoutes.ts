@@ -2,8 +2,9 @@ import { Request, Response, Router } from 'express';
 import { ApiResponse, UserActivityResponse, UserPresenceResponse, UserStatusResponse } from '../../models/ApiResponses';
 import { ErrorCode } from '../../models/ErrorTypes';
 import { validateUserData } from '../../models/validators/UserDataValidator';
+import { CacheService } from '../../services/CacheService';
 import { DiscordClient } from '../../services/DiscordClient';
-import { loadConfig } from '../../utils/config';
+import { DiscordClientFactory } from '../../services/DiscordClientFactory';
 
 /**
  * User routes for Discord user data endpoints
@@ -12,10 +13,9 @@ export class UserRoutes {
   private router: Router;
   private discordClient: DiscordClient;
 
-  constructor() {
+  constructor(cacheService: CacheService) {
     this.router = Router();
-    const config = loadConfig();
-    this.discordClient = new DiscordClient(config.discord.botToken);
+    this.discordClient = DiscordClientFactory.getInstance(cacheService);
     this.setupRoutes();
   }
 
@@ -277,5 +277,10 @@ export class UserRoutes {
   }
 }
 
-// Export router instance for use in server
-export const userRoutes = new UserRoutes().getRouter();
+// Factory function to create router with dependencies
+export function createUserRoutes(cacheService: CacheService): Router {
+  return new UserRoutes(cacheService).getRouter();
+}
+
+// Legacy export for backward compatibility - will be updated by server
+export let userRoutes: Router;
